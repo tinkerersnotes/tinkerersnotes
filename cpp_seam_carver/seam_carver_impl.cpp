@@ -121,9 +121,10 @@ bool SeamCarver::update_cost_if_needed(MeshNode* to_node) {
     return false;
 }
 
+// A node may be queued twice (as a seam neighbour and after its cost changed),
+// the second visit is cheap since all its children are already evaluated.
 void SeamCarver::enqueue_update(MeshNode* node) {
-    if (node != nullptr && node->queued_epoch != epoch_) {
-        node->queued_epoch = epoch_;
+    if (node != nullptr) {
         update_heads_[node->y].push_back(node);
     }
 }
@@ -138,7 +139,13 @@ MeshNode* SeamCarver::update_cost_incrementally() {
                 continue;
             }
             for (MeshNode* child : {down, down->left, down->right}) {
-                if (child != nullptr && update_cost_if_needed(child)) {
+                // Rows are processed top to bottom, so all parents of child are final
+                // by now and evaluating it again could not change its cost.
+                if (child == nullptr || child->evaluated_epoch == epoch_) {
+                    continue;
+                }
+                child->evaluated_epoch = epoch_;
+                if (update_cost_if_needed(child)) {
                     enqueue_update(child);
                 }
             }
@@ -171,7 +178,7 @@ void SeamCarver::remove_vertical_seam(bool incremental_cost_updates) {
         layer.clear();
     }
     has_update_heads_ = false;
-    // Starts a new dedupe generation for the heads collected below.
+    // The next incremental update marks evaluated nodes with a new epoch.
     ++epoch_;
 
     MeshNode* seam_node = find_cheapest_seam(bottom_left);

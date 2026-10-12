@@ -15,6 +15,7 @@ cdef class CyMeshNode:
     cdef public CyMeshNode left
     cdef public CyMeshNode right
     cdef public CyMeshNode prev
+    cdef unsigned int evaluated_epoch  # Last incremental update that evaluated this node
 
     def __init__(self, x: int, y: int, pixels):
         self.up = None
@@ -25,6 +26,7 @@ cdef class CyMeshNode:
         self.y = y
         self.prev = None
         self.cost = -1.0
+        self.evaluated_epoch = 0
         pix = pixels[x, y]
         self.r = pix[0]
         self.g = pix[1]
@@ -36,7 +38,11 @@ cdef class CySeamCarver:
     cdef object _image
     cdef object _pixels
     cdef list[CyMeshNode] _mesh
-    cdef dict[cython.int, set[CyMeshNode]] _seam_update_head
+    # Nodes whose children may need a cost update, one list per row
+    cdef list[list] _update_heads
+    cdef bint _has_update_heads
+    # Incremented once per removed seam, so evaluated_epoch never needs resetting
+    cdef unsigned int _epoch
     cdef CyMeshNode _top_left
 
     def __init__(self, image):
@@ -48,7 +54,9 @@ cdef class CySeamCarver:
         self._create_mesh_nodes()
         self._link_mesh_nodes()
 
-        self._seam_update_head: dict[cython.int, set[CyMeshNode]] = {}
+        self._update_heads = [[] for _ in range(self._height)]
+        self._has_update_heads = False
+        self._epoch = 0
 
     @property
     def width(self):
@@ -58,10 +66,10 @@ cdef class CySeamCarver:
     def height(self):
         return self._height
 
-    def _node_index(self, x: cython.int, y: cython.int) -> cython.int:
+    cdef inline int _node_index(self, int x, int y) noexcept:
         return y * self._width + x
 
-    def _create_mesh_nodes(self):
+    cdef _create_mesh_nodes(self):
         x: cython.int
         y: cython.int
         i: cython.int
@@ -74,7 +82,7 @@ cdef class CySeamCarver:
                 self._mesh.append(CyMeshNode(x, y, self._pixels))
         self._top_left = self._mesh[0]
 
-    def _link_mesh_nodes(self):
+    cdef _link_mesh_nodes(self):
         x: cython.int
         y: cython.int
         i: cython.int
@@ -100,21 +108,23 @@ cdef class CySeamCarver:
                     down.up = node
                     node.down = down
 
-    def _distance(self, n1: CyMeshNode, n2: CyMeshNode) -> cython.double:
+    cdef inline double _distance(self, CyMeshNode n1, CyMeshNode n2) noexcept:
         r: cython.double = n1.r - n2.r
         g: cython.double = n1.g - n2.g
         b: cython.double = n1.b - n2.b
         return sqrt(r*r + g*g + b*b)
 
-    def _update_cost(self, from_node: CyMeshNode, to_node: CyMeshNode):
-        cost: cython.double = from_node.cost if from_node.cost >= 0.0 else 0.0
-        cost += self._distance(from_node, to_node)
+    cdef inline double _path_cost(self, CyMeshNode parent, CyMeshNode to_node) noexcept:
+        return (parent.cost if parent.cost >= 0.0 else 0.0) + self._distance(parent, to_node)
+
+    cdef inline void _update_cost(self, CyMeshNode from_node, CyMeshNode to_node) noexcept:
+        cost: cython.double = self._path_cost(from_node, to_node)
 
         if to_node.cost < 0.0 or to_node.cost > cost:
             to_node.cost = cost
             to_node.prev = from_node
 
-    def _propagate_low_cost_paths(self):
+    cdef CyMeshNode _propagate_low_cost_paths(self):
         layer_top: CyMeshNode
         n: CyMeshNode
         node: CyMeshNode = self._top_left
@@ -147,7 +157,7 @@ cdef class CySeamCarver:
                 n = n.right
         return layer_top
 
-    def _update_cost_if_needed(self, to_node: CyMeshNode) -> cython.bool:
+    cdef bint _update_cost_if_needed(self, CyMeshNode to_node) noexcept:
         cost: cython.double
         if to_node.prev is not None:
             if to_node.up is to_node.prev:
@@ -163,20 +173,21 @@ cdef class CySeamCarver:
         else:
             to_node.cost = -1.0
 
-        parent_nodes: list[CyMeshNode]
-        parent_nodes = [to_node.up]
-        if to_node.up.left is not None:
-            parent_nodes.append(to_node.up.left)
-        if to_node.up.right is not None:
-            parent_nodes.append(to_node.up.right)
-
-        achievable_cost: cython.double = -1.0
-        best_parent: CyMeshNode = None
-        for parent_node in parent_nodes:
-            cost = (parent_node.cost if parent_node.cost >= 0.0 else 0.0) + self._distance(parent_node, to_node)
-            if achievable_cost < 0.0 or cost < achievable_cost:
+        # Parents are checked in the order up, up-left, up-right, the first
+        # strictly cheaper one wins
+        up: CyMeshNode = to_node.up
+        best_parent: CyMeshNode = up
+        achievable_cost: cython.double = self._path_cost(up, to_node)
+        if up.left is not None:
+            cost = self._path_cost(up.left, to_node)
+            if cost < achievable_cost:
                 achievable_cost = cost
-                best_parent = parent_node
+                best_parent = up.left
+        if up.right is not None:
+            cost = self._path_cost(up.right, to_node)
+            if cost < achievable_cost:
+                achievable_cost = cost
+                best_parent = up.right
 
         if not (achievable_cost * 0.9999 <= to_node.cost <= achievable_cost * 1.0001):
             to_node.cost = achievable_cost
@@ -185,27 +196,40 @@ cdef class CySeamCarver:
 
         return False
 
-    def _update_cost_incrementally(self):
+    # A node may be queued twice (as a seam neighbour and after its cost changed),
+    # the second visit is cheap since all its children are already evaluated.
+    cdef int _enqueue_update(self, CyMeshNode node) except -1:
+        layer: list
+        if node is not None:
+            layer = self._update_heads[node.y]
+            layer.append(node)
+        return 0
+
+    cdef int _evaluate_child(self, CyMeshNode child) except -1:
+        # Rows are processed top to bottom, so all parents of child are final
+        # by now and evaluating it again could not change its cost.
+        if child is None or child.evaluated_epoch == self._epoch:
+            return 0
+        child.evaluated_epoch = self._epoch
+        if self._update_cost_if_needed(child):
+            self._enqueue_update(child)
+        return 0
+
+    cdef CyMeshNode _update_cost_incrementally(self):
         node: CyMeshNode
         layer_top: CyMeshNode
         depth: cython.int
+        layer: list
 
         for depth in range(self._height):
-            if depth > 0:
-                del self._seam_update_head[depth - 1]
-            for node in self._seam_update_head[depth]:
+            # Only rows below depth grow here, so iterating this row is safe
+            layer = self._update_heads[depth]
+            for node in layer:
                 if node.down is None:
                     continue
-
-                if self._update_cost_if_needed(node.down):
-                        self._seam_update_head[depth+1].add(node.down)
-
-                if node.down.left is not None:
-                    if self._update_cost_if_needed(node.down.left):
-                        self._seam_update_head[depth+1].add(node.down.left)
-                if node.down.right is not None:
-                    if self._update_cost_if_needed(node.down.right):
-                        self._seam_update_head[depth+1].add(node.down.right)
+                self._evaluate_child(node.down)
+                self._evaluate_child(node.down.left)
+                self._evaluate_child(node.down.right)
 
         node = self._top_left
         while node is not None:
@@ -213,7 +237,7 @@ cdef class CySeamCarver:
             node = node.down
         return layer_top
 
-    def _find_cheapest_seam(self, bottom_left: CyMeshNode) -> CyMeshNode:
+    cdef CyMeshNode _find_cheapest_seam(self, CyMeshNode bottom_left):
         cheapest: CyMeshNode = bottom_left
         n: CyMeshNode = bottom_left
         while n is not None:
@@ -222,24 +246,27 @@ cdef class CySeamCarver:
             n = n.right
         return cheapest
 
-    def _remove_vertical_seam(self, incremental_cost_updates: cython.bool):
+    cdef _remove_vertical_seam(self, bint incremental_cost_updates):
         node: CyMeshNode
         layer_top: CyMeshNode
         seam_node: CyMeshNode
 
         bottom_left: CyMeshNode
-        if incremental_cost_updates and len(self._seam_update_head) > 0:
+        layer: list
+        if incremental_cost_updates and self._has_update_heads:
             bottom_left = self._update_cost_incrementally()
-            self._seam_update_head = {}
         else:
             bottom_left = self._propagate_low_cost_paths()
 
         cheapest: CyMeshNode = self._find_cheapest_seam(bottom_left)
         seam_node = cheapest
 
-        self._seam_update_head = {}
+        for layer in self._update_heads:
+            layer.clear()
+        self._has_update_heads = False
+        # The next incremental update marks evaluated nodes with a new epoch
+        self._epoch += 1
 
-        depth: cython.int = self._height - 1
         prev_removed_node: CyMeshNode = None
         while seam_node is not None:
             left = seam_node.left
@@ -277,12 +304,9 @@ cdef class CySeamCarver:
 
             # Head of incremental low cost propagation
             if incremental_cost_updates:
-                self._seam_update_head[depth] = set()
-                if prev_removed_node.left is not None:
-                    self._seam_update_head[depth].add(prev_removed_node.left)
-                if prev_removed_node.right is not None:
-                    self._seam_update_head[depth].add(prev_removed_node.right)
-            depth -= 1
+                self._enqueue_update(prev_removed_node.left)
+                self._enqueue_update(prev_removed_node.right)
+                self._has_update_heads = True
         self._width -= 1
 
     def shrink_horizontally(self, pixels_to_shrink: cython.int, incremental_cost_updates: cython.bool = True):

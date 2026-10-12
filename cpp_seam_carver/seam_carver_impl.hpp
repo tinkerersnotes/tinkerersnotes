@@ -20,7 +20,7 @@ struct MeshNode {
     double cost = -1.0;
     int x;
     int y;  // Never changes, rows are not removed by horizontal shrinking
-    std::uint32_t queued_epoch = 0;  // Dedupes incremental update queues
+    std::uint32_t evaluated_epoch = 0;  // Last incremental update that evaluated this node
     std::uint8_t r;
     std::uint8_t g;
     std::uint8_t b;
@@ -66,6 +66,7 @@ private:
     // Counterpart of seam_update_head: nodes whose cost may be stale, per row.
     std::vector<std::vector<MeshNode*>> update_heads_;
     bool has_update_heads_ = false;
+    // Incremented once per removed seam, so evaluated_epoch never needs resetting
     std::uint32_t epoch_ = 0;
 };
 
