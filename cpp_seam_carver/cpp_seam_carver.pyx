@@ -1,6 +1,6 @@
 # distutils: language = c++
 # distutils: sources = seam_carver_impl.cpp
-# distutils: extra_compile_args = -O3 -std=c++17
+# distutils: extra_compile_args = -O3 -std=c++17 -fvisibility=hidden
 # cython: language_level=3
 
 from libc.stdint cimport uint8_t
@@ -26,7 +26,7 @@ cdef class CppSeamCarver:
     cdef bint busy
 
     # Construction happens exactly once in __cinit__, like in immutable built-in
-    # types. There is no __init__, so calling it again is a no-op.
+    # types, so calling __init__ again can't replace the carver.
     def __cinit__(self, image):
         rgb_image = image if image.mode == 'RGB' else image.convert('RGB')
         width, height = rgb_image.size
@@ -34,6 +34,11 @@ cdef class CppSeamCarver:
         cdef const unsigned char* rgb_data = rgb
         # The C++ side copies the pixels into its mesh, rgb may be freed afterwards
         self.carver.reset(new SeamCarver(rgb_data, width, height))
+
+    # Intentionally a no-op. It lets subclasses call super().__init__(image),
+    # which object.__init__ would reject once a subclass defines __init__.
+    def __init__(self, image):
+        pass
 
     cdef SeamCarver* checked_carver(self) except NULL:
         if self.busy:

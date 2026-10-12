@@ -71,7 +71,7 @@ _lib = _load_library()
 
 class CtypesSeamCarver:
     # Construction happens exactly once in __new__, like in immutable built-in
-    # types. There is no __init__, so calling it again is a no-op.
+    # types, so calling __init__ again can't replace the native object.
     def __new__(cls, image):
         self = super().__new__(cls)
         rgb_image = image if image.mode == 'RGB' else image.convert('RGB')
@@ -87,6 +87,11 @@ class CtypesSeamCarver:
         # must not use the native object at the same time.
         self._lock = threading.Lock()
         return self
+
+    # Intentionally a no-op. It lets subclasses call super().__init__(image),
+    # which object.__init__ would reject once a subclass defines __init__.
+    def __init__(self, image):
+        pass
 
     @contextlib.contextmanager
     def _native(self):
