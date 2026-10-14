@@ -1,5 +1,6 @@
 # distutils: language = c++
-# distutils: sources = seam_carver_impl.cpp
+# distutils: sources = ../seam_carver_core/seam_carver_impl.cpp
+# distutils: include_dirs = ../seam_carver_core
 # distutils: extra_compile_args = -O3 -std=c++17 -fvisibility=hidden
 # cython: language_level=3
 

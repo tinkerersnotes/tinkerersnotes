@@ -2,8 +2,8 @@ from pathlib import Path
 
 from setuptools import Extension, setup
 
-# The C++ core is shared with cpp_seam_carver, only the Python binding differs
-cpp_core_dir = Path('..', 'cpp_seam_carver')
+# The C++ core is shared by all native modules, only the Python binding differs
+cpp_core_dir = Path('..', 'seam_carver_core')
 
 setup(
     name='Seam carver Python C API demo app',

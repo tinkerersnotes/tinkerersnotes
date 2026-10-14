@@ -27,7 +27,7 @@ incremental_cost_updates=True)`, `get_shrunk_image()` → RGB `PIL.Image`, `widt
 |---|---|---|
 | `py_seam_carver` | `PySeamCarver` | Pure Python. Nodes are `__slots__` objects. Mirrors the Cython version method for method. |
 | `cy_seam_carver` | `CySeamCarver` | "Python-ish" Cython: `cdef class` nodes linked by Python object references. |
-| `cpp_seam_carver` | `CppSeamCarver` | Cython wrapper (`cdef extern … cppclass`, `unique_ptr`, `nogil`) over the shared C++ core `seam_carver_impl.{hpp,cpp}`. The mesh is a single reserved `std::vector<MeshNode>`. |
+| `cpp_seam_carver` | `CppSeamCarver` | Cython wrapper (`cdef extern … cppclass`, `unique_ptr`, `nogil`) over the shared C++ core `seam_carver_core/seam_carver_impl.{hpp,cpp}`. The mesh is a single reserved `std::vector<MeshNode>`. |
 | `c_seam_carver` | `CSeamCarver` | Hand-written classic Python C API extension (static `PyTypeObject`, `tp_new`, RAII helpers) over the same C++ core. |
 | `ctypes_seam_carver` | `CtypesSeamCarver` | Pure Python `ctypes` wrapper over an `extern "C"` dynamic library (`libseam_carver.so`) built from the same C++ core. |
 
