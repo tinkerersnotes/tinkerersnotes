@@ -19,7 +19,7 @@ struct MeshNode {
     MeshNode* prev = nullptr;  // Parent on the cheapest path from the top row
     double cost = -1.0;
     int x;
-    int y;  // Never changes, rows are not removed by horizontal shrinking
+    int y;
     std::uint32_t evaluated_epoch = 0;  // Last incremental update that evaluated this node
     std::uint8_t r;
     std::uint8_t g;
@@ -32,7 +32,6 @@ public:
     // rgb is a row-major buffer of width * height * 3 bytes.
     SeamCarver(const std::uint8_t* rgb, int width, int height);
 
-    // Nodes point into nodes_, so a copy would point into the wrong buffer.
     SeamCarver(const SeamCarver&) = delete;
     SeamCarver& operator=(const SeamCarver&) = delete;
 
@@ -58,12 +57,10 @@ private:
 
     int width_;
     int height_;
-    // Single contiguous allocation for the whole mesh. Its capacity is
-    // reserved once and never exceeded, so MeshNode pointers stay valid.
     std::vector<MeshNode> nodes_;
     MeshNode* top_left_ = nullptr;
 
-    // Counterpart of seam_update_head: nodes whose cost may be stale, per row.
+    // Nodes whose cost may be stale, per row.
     std::vector<std::vector<MeshNode*>> update_heads_;
     bool has_update_heads_ = false;
     // Incremented once per removed seam, so evaluated_epoch never needs resetting
