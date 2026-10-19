@@ -5,7 +5,9 @@ Every step was verified to produce pixel-identical output across all modules.
 
 ## Setup
 
-- Linux VM (aarch64, Parallels), Python 3.12.3, Cython 3.3.0, g++ 13.3, Pillow 12.3.
+- Linux VM (aarch64, Parallels), Ubuntu 24.04, Python 3.12.3, Cython 3.3.0, g++ 13.3, Pillow 12.3.
+  Steps 1–10 were measured on this setup; step 11 re-measures everything after the upgrade to
+  Ubuntu 26.04 (Python 3.14.4, g++ 15.2, Pillow 13.0).
 - Test image: `tundra_1280x958.jpeg`. A run removes 50 or 600 vertical seams
   (1280 → 680 px wide) with incremental cost updates unless stated otherwise.
 - Timings are wall-clock, best of 3 or median of 3–5 alternating runs. Runs on this VM vary by
@@ -37,7 +39,8 @@ supports `super().__init__(image)`.
 
 ## Results at a glance
 
-600 seams, total time including construction and export:
+600 seams, total time including construction and export, measured on Ubuntu 24.04 (step 11 has
+the Ubuntu 26.04 numbers):
 
 | Module | First measurement | Final | Overall gain |
 |---|---|---|---|
@@ -280,6 +283,59 @@ Cython.
 Shrinking alone, Cython is now about 2× behind the native modules (3.04 s vs 1.46 s), and pure
 Python about 35× behind.
 
+## 11. Toolchain upgrade: Ubuntu 24.04 → 26.04
+
+**Change.** The VM was upgraded to Ubuntu 26.04: Python 3.12.3 → 3.14.4, g++ 13.3 → 15.2,
+glibc 2.39 → 2.43, Linux kernel 7.0, Pillow 12.3 → 13.0. Cython 3.3.0 and NumPy were unchanged.
+All compiled modules were rebuilt from clean with no warnings. All five modules still produce
+identical images and pass the same checks: error types, re-init, subclassing, busy guard, no
+memory growth.
+
+**600 seams** (total time, best of 3; pure Python one run):
+
+| Module | Ubuntu 24.04 | Ubuntu 26.04 | Change |
+|---|---|---|---|
+| `PySeamCarver` | 52.8 s | 61.9 s | +17% (construction 1.40 → 0.95 s, shrinking 51.3 → 60.8 s) |
+| `CySeamCarver` | 3.55 s | 3.46 s | −3% (shrinking unchanged, 3.04 → 3.03 s) |
+| `CppSeamCarver` | 1.49 s | 1.64 s | +10% |
+| `CSeamCarver` | 1.48 s | 1.64 s | +11% |
+| `CtypesSeamCarver` | 1.52 s | 1.73 s | +14% |
+
+**50 seams:** `PySeamCarver` 6.60 → 7.04 s, `CySeamCarver` 0.91 → 0.83 s, native modules
+0.17 → 0.18 s.
+
+**Investigating the native slowdown.** A standalone C++ benchmark of the core (no Python)
+takes a median of 1.711 s [1.696–1.718] for 600 seams, against 1.521 s before the upgrade.
+That is **+12.5%**, with the same result checksum, so it is a real change, not noise.
+
+| Suspect | How it was tested | Result |
+|---|---|---|
+| Different code for the hot function | Disassembled `update_cost_if_needed` | Unchanged: 120 instructions, no calls, three `fsqrt`, as with g++ 13 |
+| g++ 15 hardening defaults | Stack protector, stack-clash protection, branch protection and padding zero-init all off | −0.1% |
+| CPU tuning | `-mcpu=native` | −0.3% |
+| Nodes straddling cache lines | The node array starts 16 bytes into a cache line; tried `alignas(64)` | +1.2% (slower) |
+| Huge pages | glibc 2.43 `malloc` now puts the 78 MB node array on 2 MB pages; switched off via `GLIBC_TUNABLES=glibc.malloc.hugetlb=0` | +1.9% (slower) |
+| Kernel or scheduler overhead | `perf stat` | Ruled out: 1.733 s user against 0.037 s kernel time, 16 context switches, no CPU migrations |
+| Inlining decisions | `perf record` shows `enqueue_update` as a separate call (2.5%); forced inlining of it and of `update_cost_if_needed` | −1.9% at best |
+| Other optimization choices | `-O3 -fno-tree-vectorize`; `-O2` | −1.3%; +16.9% (slower) |
+
+`perf record` (20 kHz CPU-clock sampling) puts 62% of the time in `update_cost_if_needed`, 24%
+in `update_cost_incrementally` and 5.6% in `remove_vertical_seam`. Hardware counters (cycles,
+instructions, cache and TLB misses) are not exposed inside this Parallels VM, so instructions
+per cycle and miss rates could not be measured.
+
+**Conclusion.** The best g++ 15 variant still runs about 11% slower than the old build. No
+compiler flag, hardening option, inlining choice, alignment or page-size setting explains
+the gap, and the hot function compiles to the same instructions. `CySeamCarver`, also
+compiled by g++ 15, did not slow down. That suggests an environment effect that hits the
+native core harder: a change in the kernel, hypervisor or memory behaviour that matters most
+when following pointers through one 78 MB array, while Cython's time is dominated by call
+overhead. This is not proven. Settling it needs either the old compiler (g++ 13 is no longer
+installed, only its C compiler survived) or hardware counters, which this VM does not provide.
+
+The pure-Python slowdown has a separate cause: Python 3.14 itself. Shrinking got 18% slower
+while construction got 30% faster.
+
 ---
 
 ## Lessons
@@ -300,6 +356,9 @@ Python about 35× behind.
    over a tuple literal each allocate Python objects in the hot path.
 8. **Profiling needs care on this stack.** Python 3.12's `cProfile` cannot see Cython code, and
    `perf` may be disabled. A small `sys.setprofile` hook or `SIGPROF` sampler fills the gap.
+9. **Re-measure after every toolchain upgrade.** The same code moved by −3% to +17% from
+   Ubuntu 24.04 to 26.04, differently for each flavor. Keep the old build around until the
+   comparison is done: once it is gone, a direct before/after comparison is impossible.
 
 ## Measured but not applied
 
