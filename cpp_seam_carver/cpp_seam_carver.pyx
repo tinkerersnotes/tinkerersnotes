@@ -1,7 +1,7 @@
 # distutils: language = c++
 # distutils: sources = ../seam_carver_core/seam_carver_impl.cpp
 # distutils: include_dirs = ../seam_carver_core
-# distutils: extra_compile_args = -O3 -std=c++17 -fvisibility=hidden
+# Compile flags depend on the compiler and are set in setup.py
 # cython: language_level=3
 
 from libc.stdint cimport uint8_t

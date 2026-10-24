@@ -1,7 +1,7 @@
 # Python dependencies of the notebooks and the seam carver modules in this repo.
 # This is not an installable package: it only declares dependency groups (PEP 735).
 #
-# Set up everything with ./init.sh, which runs:
+# Set up everything with ./init.sh (init.cmd on Windows), which runs:
 #   pip install --group notebooks -c constraints.txt    (needs pip >= 25.1)
 #
 # Version bounds mark the major versions the code is written for;

@@ -1,7 +1,7 @@
 """Seam carver calling a C-style dynamic library through ctypes.
 
 Same public interface as cpp_seam_carver.CppSeamCarver and
-c_seam_carver.CSeamCarver. Build the library first with ./build.sh.
+c_seam_carver.CSeamCarver. Build the library first with ./build.sh (build.ps1 on Windows).
 """
 import contextlib
 import ctypes
@@ -45,7 +45,7 @@ def _load_library():
     try:
         lib = ctypes.CDLL(str(_LIBRARY_PATH))
     except OSError as e:
-        raise ImportError(f'cannot load {_LIBRARY_PATH.name}, run build.sh first: {e}') from e
+        raise ImportError(f'cannot load {_LIBRARY_PATH.name}, run build.sh (build.ps1 on Windows) first: {e}') from e
 
     # Without argtypes / restype ctypes assumes int, which truncates 64-bit pointers
     lib.sc_create.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,

@@ -1,0 +1,6 @@
+# Line endings that must survive any checkout: a Windows one converts text files to CRLF,
+# which breaks shell scripts on Linux and macOS, while cmd.exe scripts need CRLF.
+*.sh  text eol=lf
+*.cmd text eol=crlf
+# Jupyter always saves notebooks with LF, so a CRLF checkout would only flip-flop.
+*.ipynb text eol=lf
