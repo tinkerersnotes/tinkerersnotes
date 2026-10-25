@@ -2,7 +2,7 @@
 # This is not an installable package: it only declares dependency groups (PEP 735).
 #
 # Set up everything with ./init.sh (init.cmd on Windows), which runs:
-#   pip install --group notebooks -c constraints.txt    (needs pip >= 25.1)
+#   pip install --group notebooks --group dev -c constraints.txt    (needs pip >= 25.1)
 #
 # Version bounds mark the major versions the code is written for;
 # constraints.txt pins the exact versions it was tested with (see update-constraints.sh).
@@ -22,3 +22,6 @@ notebooks = [
     "matplotlib>=3",  # cython_and_ctypes.ipynb plots
     "numpy>=2",       # seam_carver.ipynb image conversions
 ]
+
+# Repository tooling: nbstripout keeps notebook outputs out of commits (configure_git.py)
+dev = ["nbstripout>=0.9"]

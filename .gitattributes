@@ -4,3 +4,6 @@
 *.cmd text eol=crlf
 # Jupyter always saves notebooks with LF, so a CRLF checkout would only flip-flop.
 *.ipynb text eol=lf
+# Notebooks are committed without their outputs: the nbstripout filter strips them when staging,
+# while the working copy keeps them. configure_git.py, run by init.sh / init.cmd, sets it up per clone.
+*.ipynb filter=nbstripout diff=ipynb

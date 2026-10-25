@@ -30,3 +30,6 @@ tundra_resized_*.png
 
 # Local virtual environment (init.sh)
 .venv-tn/
+
+# macOS Finder metadata
+.DS_Store

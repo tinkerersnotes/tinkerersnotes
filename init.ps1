@@ -48,7 +48,10 @@ if (-not ((Test-Path $venvPython) -and (Test-Python $venvPython 'pass'))) {
     Invoke-Native { python -m venv --clear $tnvenv }
 }
 Invoke-Native { & $venvPython -m pip install --upgrade 'pip>=25.1' }  # dependency groups need pip >= 25.1
-Invoke-Native { & $venvPython -m pip install --group notebooks -c constraints.txt }
+Invoke-Native { & $venvPython -m pip install --group notebooks --group dev -c constraints.txt }
+
+# Commit notebooks without their outputs: sets up the nbstripout git filter for this clone
+Invoke-Native { & $venvPython configure_git.py }
 
 # Native seam carver modules, imported by seam_carver.ipynb
 foreach ($module in 'cy_seam_carver', 'cpp_seam_carver', 'c_seam_carver') {

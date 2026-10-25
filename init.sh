@@ -23,7 +23,10 @@ if ! "$tnvenv/bin/python" -c '' 2>/dev/null; then
 fi
 source "$tnvenv/bin/activate"
 python -m pip install --upgrade 'pip>=25.1'  # dependency groups need pip >= 25.1
-python -m pip install --group notebooks -c constraints.txt
+python -m pip install --group notebooks --group dev -c constraints.txt
+
+# Commit notebooks without their outputs: sets up the nbstripout git filter for this clone
+python configure_git.py
 
 # Native seam carver modules, imported by seam_carver.ipynb
 for module in cy_seam_carver cpp_seam_carver c_seam_carver ctypes_seam_carver; do
