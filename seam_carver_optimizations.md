@@ -93,7 +93,12 @@ library at load time, so GCC will not inline the hot helpers into the seam loops
 | ctypes library without it | 1.96 s |
 | `CSeamCarver` rebuilt with it | 1.33 s |
 
-**Change.** Added `-fvisibility=hidden` to `cpp_seam_carver.pyx` and `c_seam_carver/setup.py`.
+**Change.** Added `-fvisibility=hidden` to the compile flags of `cpp_seam_carver` and
+`c_seam_carver`. The flags now live in each module's `setup.py`, whose `BuildExt` class picks
+GCC/Clang or MSVC flags for the compiler in use; `cpp_seam_carver.pyx` no longer sets them,
+because a `# distutils:` directive can't depend on the compiler. MSVC needs no equivalent: a
+Windows DLL exports only `__declspec(dllexport)` symbols, and calls inside it are never replaced
+at load time, so the compiler can inline freely.
 
 **Gain.** All three native flavors now run 300 seams in 1.36–1.41 s, about **×1.35**. Exported
 symbols dropped from 14 to 1 (`PyInit_*`). Other compiler flags (`-O3`, `-DNDEBUG`, `-g`,
@@ -345,7 +350,7 @@ while construction got 30% faster.
 2. **The binding layer is irrelevant when calls are coarse-grained.** Cython, the C API and
    ctypes all run the same C++ core at the same speed.
 3. **Build flags can impersonate binding differences.** `-fvisibility=hidden` alone was worth
-   ×1.35 in `-fPIC` extension modules.
+   ×1.35 in `-fPIC` extension modules on Linux. Windows DLLs behave that way by default.
 4. **Cython speedups come from C-level types, not from compilation.** `cdef` methods gave
    ×3–×11. Compiling unchanged Python made it ~3× *slower* than CPython 3.12.
 5. **Type annotations do nothing in CPython.** The bytecode is identical, so the timings are

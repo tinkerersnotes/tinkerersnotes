@@ -57,7 +57,8 @@ Invoke-Native { & $venvPython configure_git.py }
 foreach ($module in 'cy_seam_carver', 'cpp_seam_carver', 'c_seam_carver') {
     Push-Location $module
     try {
-        Invoke-Native { & $venvPython setup.py build_ext --inplace }
+        # --force: build_ext does not notice changes to setup.py, such as new compile flags
+        Invoke-Native { & $venvPython setup.py build_ext --inplace --force }
     } finally {
         Pop-Location
     }
