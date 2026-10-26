@@ -48,7 +48,10 @@
     border-radius: 8px;
   }
   .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-  .row > label[for] { min-width: 9.5em; }
+  .row > label[for], fieldset.row > legend { min-width: 9.5em; }
+  fieldset.row { border: 0; margin: 0; padding: 0; }
+  /* A legend can't be a flex item: floating it puts it in the row with the radio buttons */
+  fieldset.row > legend { float: left; padding: 0; margin-right: 12px; }
   button, input[type="number"] {
     font: inherit;
     color: var(--text);
@@ -75,9 +78,10 @@
 <main>
   <h1>Seam carving in WebAssembly</h1>
   <p class="lede">The same C++ <code>SeamCarver</code> class as the Python modules in this repo,
-    compiled to WebAssembly with Emscripten. Pick a picture, then choose how much narrower and
-    lower it should get: the lowest-energy seams disappear while the content keeps its proportions.
-    The height shrinks by turning the picture a quarter turn, removing vertical seams and turning it back.</p>
+    compiled to WebAssembly with Emscripten, or its line-by-line JavaScript port, which removes
+    exactly the same seams. Pick a picture, then choose how much narrower and lower it should get:
+    the lowest-energy seams disappear while the content keeps its proportions. The height shrinks
+    by turning the picture a quarter turn, removing vertical seams and turning it back.</p>
 
   <section class="controls">
     <div class="row">
@@ -85,6 +89,11 @@
       <button type="button" id="sample">Use the sample picture</button>
       <label><input type="checkbox" id="downscale" checked> Downscale to at most 1280 px wide</label>
     </div>
+    <fieldset class="row">
+      <legend>Seam carver</legend>
+      <label><input type="radio" name="engine" value="wasm" checked> C++ core in WebAssembly</label>
+      <label><input type="radio" name="engine" value="js"> JavaScript port</label>
+    </fieldset>
     <div class="row">
       <label for="width-seams">Shrink width by</label>
       <input type="range" id="width-seams" min="0" max="0" value="0" disabled>
@@ -113,6 +122,7 @@
 </main>
 
 <script>@@SEAM_CARVER_WASM_JS@@</script>
+<script>@@SEAM_CARVER_JS@@</script>
 <script>
 'use strict';
 
@@ -120,10 +130,11 @@ const SAMPLE_IMAGE = '@@SAMPLE_IMAGE_DATA_URL@@';
 const MAX_WIDTH = 1280;
 const SEAMS_PER_STEP = 10;  // seams removed between repaints, so the page stays responsive
 
-// Counterpart of cpp_seam_carver.CppSeamCarver: an image in and out, the C++ core in between.
-// The constructor, shrink_horizontally() and the shrunk pixels all go to the WebAssembly module.
-class JsSeamCarver {
-  constructor(wasm, imageData) {
+// Counterpart of cpp_seam_carver.CppSeamCarver: an image in and out, a seam carver core in
+// between. The constructor, shrink_horizontally() and the shrunk pixels all go to the core:
+// the C++ class in the WebAssembly module, or its JavaScript port from seam_carver.js.
+class ImageSeamCarver {
+  constructor(Core, imageData) {
     const { width, height, data } = imageData;
     const rgb = new Uint8Array(width * height * 3);  // RGBA canvas pixels to the core's RGB bytes
     for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
@@ -131,7 +142,7 @@ class JsSeamCarver {
       rgb[j + 1] = data[i + 1];
       rgb[j + 2] = data[i + 2];
     }
-    this.carver = new wasm.SeamCarver(rgb, width, height);
+    this.carver = new Core(rgb, width, height);
   }
 
   get width() { return this.carver.width; }
@@ -157,6 +168,7 @@ class JsSeamCarver {
   }
 
   // WebAssembly memory is not garbage collected: the C++ object must be freed explicitly
+  // (a no-op for the JavaScript port)
   delete() { this.carver.delete(); }
 }
 
@@ -198,7 +210,9 @@ const axes = {
   height: { slider: $('height-seams'), number: $('height-seams-number'), target: 0 },
 };
 
+const ENGINE_NAMES = { wasm: 'the C++ core in WebAssembly', js: 'the JavaScript port' };
 let wasm = null;
+let engine = 'wasm';        // 'wasm' or 'js', from the radio buttons
 let source = null;          // Blob of the current picture, reloaded when the downscale option changes
 let originalImage = null;   // ImageData the width carver was built from
 // The width carver removes vertical seams from the original. The height carver removes vertical
@@ -227,6 +241,11 @@ function describe(error) {
 }
 
 const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve)));
+
+// Seam carver core of the selected engine: both have the same interface
+function core() {
+  return engine === 'wasm' ? wasm.SeamCarver : SeamCarver;
+}
 
 function discardHeightCarver() {
   heightCarver?.delete();
@@ -273,10 +292,10 @@ async function loadPicture(blob) {
   try {
     widthCarver?.delete();
     discardHeightCarver();
-    widthCarver = new JsSeamCarver(wasm, originalImage);
+    widthCarver = new ImageSeamCarver(core(), originalImage);
   } catch (error) {
     widthCarver = null;
-    setStatus(`The picture could not be loaded into WebAssembly: ${describe(error)}`, true);
+    setStatus(`The picture could not be loaded into ${ENGINE_NAMES[engine]}: ${describe(error)}`, true);
     return;
   }
   widthRemoved = 0;
@@ -315,7 +334,7 @@ async function shrink() {
         if (widthTarget < widthRemoved) {
           // Seams can't be put back: start again from the original picture
           widthCarver.delete();
-          widthCarver = new JsSeamCarver(wasm, originalImage);
+          widthCarver = new ImageSeamCarver(core(), originalImage);
           widthRemoved = 0;
         }
         const step = Math.min(widthTarget - widthRemoved, SEAMS_PER_STEP);
@@ -332,7 +351,7 @@ async function shrink() {
         if (!heightCarver || heightTarget < heightRemoved) {
           heightCarver?.delete();
           rotatedWidthResult ??= rotateClockwise(widthCarver.get_shrunk_image());
-          heightCarver = new JsSeamCarver(wasm, rotatedWidthResult);
+          heightCarver = new ImageSeamCarver(core(), rotatedWidthResult);
           heightRemoved = 0;
         }
         const step = Math.min(heightTarget - heightRemoved, SEAMS_PER_STEP);
@@ -347,7 +366,7 @@ async function shrink() {
     }
     drawShrunk();
     setStatus(`${originalImage.width} × ${originalImage.height} → ${shrunkCanvas.width} × ${shrunkCanvas.height} px ` +
-              `in ${elapsedMs.toFixed(0)} ms.`);
+              `in ${elapsedMs.toFixed(0)} ms with ${ENGINE_NAMES[engine]}.`);
   } catch (error) {
     setStatus(`Shrinking failed: ${describe(error)}`, true);
   } finally {
@@ -370,6 +389,22 @@ $('file').addEventListener('change', (event) => {
 $('sample').addEventListener('click', async () => loadPicture(await (await fetch(SAMPLE_IMAGE)).blob()));
 $('downscale').addEventListener('change', () => source && loadPicture(source));
 
+// Switching engines starts both carvers again from the original picture, with the same targets
+for (const radio of document.querySelectorAll('input[name="engine"]')) {
+  radio.addEventListener('change', () => {
+    engine = radio.value;
+    if (!originalImage) {
+      return;
+    }
+    widthCarver?.delete();
+    discardHeightCarver();
+    widthCarver = new ImageSeamCarver(core(), originalImage);
+    widthRemoved = 0;
+    elapsedMs = 0;
+    shrink();
+  });
+}
+
 // Drop a picture anywhere on the page
 document.addEventListener('dragover', (event) => {
   event.preventDefault();
@@ -389,11 +424,20 @@ document.addEventListener('drop', (event) => {
   }
 });
 
-createSeamCarverModule().then(async (module) => {
+// Without WebAssembly the page still works with the JavaScript port
+createSeamCarverModule().then((module) => {
   wasm = module;
+  // Browsers may restore the radio button chosen before a reload without a change event
+  engine = document.querySelector('input[name="engine"]:checked').value;
+}, (error) => {
+  engine = 'js';
+  document.querySelector('input[name="engine"][value="js"]').checked = true;
+  document.querySelector('input[name="engine"][value="wasm"]').disabled = true;
+  console.warn('WebAssembly module failed to load, using the JavaScript port:', error);
+}).then(async () => {
   setStatus('Ready. Loading the sample picture…');
   await loadPicture(await (await fetch(SAMPLE_IMAGE)).blob());
-}).catch((error) => setStatus(`The WebAssembly module failed to load: ${describe(error)}`, true));
+});
 </script>
 </body>
 </html>

@@ -1,0 +1,63 @@
+# Builds the standalone seam carver page (wasm_seam_carver/build.sh) and publishes it on
+# GitHub Pages, at https://<owner>.github.io/<repo>/.
+#
+# One-time setup in the repository: Settings > Pages > Build and deployment > Source: GitHub Actions.
+name: Publish seam carver page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wasm_seam_carver/**'
+      - 'seam_carver_core/**'
+      - 'tundra_1280x958.jpeg'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:  # also runs from the Actions tab
+
+permissions:
+  contents: read
+  pages: write     # deploy to Pages
+  id-token: write  # prove to Pages that the deployment comes from this workflow
+
+# One deployment at a time; a newer push waits instead of cancelling a deployment halfway
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner's apt emscripten is much older, so install the version the page is developed with
+      - name: Install Emscripten 3.1.69
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 3.1.69
+          "$RUNNER_TEMP/emsdk/emsdk" activate 3.1.69
+
+      - name: Build the page
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          wasm_seam_carver/build.sh
+
+      # The page is self-contained: one file is the whole site
+      - name: Collect the site
+        run: |
+          mkdir site
+          cp wasm_seam_carver/seam_carver.html site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

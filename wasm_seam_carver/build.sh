@@ -17,7 +17,7 @@ em++ -O3 -std=c++17 -Wall -Wextra -fwasm-exceptions -I../seam_carver_core \
     -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=4GB -sSINGLE_FILE \
     -o build/seam_carver_wasm.js
 
-# Inline the module and the sample picture into the page template
+# Inline the module, the JavaScript port and the sample picture into the page template
 python3 - <<'EOF'
 import base64
 from pathlib import Path
@@ -27,7 +27,9 @@ module = Path('build/seam_carver_wasm.js').read_text()
 module = module.replace('</script', '<\\/script')
 sample = base64.b64encode(Path('../tundra_1280x958.jpeg').read_bytes()).decode()
 page = Path('seam_carver.template.html').read_text()
+port = Path('seam_carver.js').read_text().replace('</script', '<\\/script')  # JavaScript port of the core
 for placeholder, value in (('@@SEAM_CARVER_WASM_JS@@', module),
+                           ('@@SEAM_CARVER_JS@@', port),
                            ('@@SAMPLE_IMAGE_DATA_URL@@', 'data:image/jpeg;base64,' + sample)):
     assert page.count(placeholder) == 1, placeholder
     page = page.replace(placeholder, value)
