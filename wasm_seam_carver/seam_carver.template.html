@@ -5,6 +5,36 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Seam Carver in WebAssembly</title>
+<script>
+// The multithreaded engine needs SharedArrayBuffer, which browsers only enable on cross-origin
+// isolated pages. GitHub Pages can't send the headers for that, so isolation_service_worker.js
+// adds them, from the first reload on. This runs first, so that reload comes before the rest loads.
+(() => {
+  if (window.crossOriginIsolated || location.protocol === 'file:' || !window.isSecureContext ||
+      !('serviceWorker' in navigator)) {
+    return;  // already isolated, or opened from disk: no service worker possible
+  }
+  // Reload at most once per tab: if the browser ignores the headers, the page must not loop
+  const reloadOnce = () => {
+    try {
+      if (sessionStorage.getItem('isolation-reloaded')) {
+        return;
+      }
+      sessionStorage.setItem('isolation-reloaded', '1');
+    } catch {
+      return;
+    }
+    location.reload();
+  };
+  navigator.serviceWorker.register('isolation_service_worker.js').then(() => {
+    if (navigator.serviceWorker.controller) {
+      reloadOnce();  // a worker answered this page but it isn't isolated, e.g. a hard reload bypassed it
+    } else {
+      navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+    }
+  }, (error) => console.warn('No service worker, so no cross-origin isolation and no threads:', error));
+})();
+</script>
 <style>
   :root {
     color-scheme: light;
@@ -66,6 +96,9 @@
   input[type="number"] { width: 6.5em; }
   .unit { color: var(--text-secondary); }
   #status { margin: 0; color: var(--text-secondary); min-height: 1.5em; }
+  .note { margin: 0; color: var(--text-secondary); font-size: 0.9rem; max-width: 80ch; }
+  .note:empty { display: none; }
+  label:has(input:disabled) { color: var(--text-secondary); opacity: 0.7; }
   #status.error { color: var(--error); }
   .images { display: grid; gap: 20px; margin-top: 20px; }
   figure { margin: 0; }
@@ -79,9 +112,11 @@
   <h1>Seam carving in WebAssembly</h1>
   <p class="lede">The same C++ <code>SeamCarver</code> class as the Python modules in this repo,
     compiled to WebAssembly with Emscripten, or its line-by-line JavaScript port, which removes
-    exactly the same seams. Pick a picture, then choose how much narrower and lower it should get:
-    the lowest-energy seams disappear while the content keeps its proportions. The height shrinks
-    by turning the picture a quarter turn, removing vertical seams and turning it back.</p>
+    exactly the same seams. Two more engines recompute every seam from scratch in parallel: a
+    C++ version on several threads, and one on the GPU with WebGPU. Pick a picture, then choose
+    how much narrower and lower it should get: the lowest-energy seams disappear while the content
+    keeps its proportions. The height shrinks by turning the picture a quarter turn, removing
+    vertical seams and turning it back.</p>
 
   <section class="controls">
     <div class="row">
@@ -91,9 +126,13 @@
     </div>
     <fieldset class="row">
       <legend>Seam carver</legend>
-      <label><input type="radio" name="engine" value="wasm" checked> C++ core in WebAssembly</label>
+      <label><input type="radio" name="engine" value="wasm" checked disabled> C++ core in WebAssembly</label>
       <label><input type="radio" name="engine" value="js"> JavaScript port</label>
+      <label><input type="radio" name="engine" value="tiled" disabled> C++ on <span id="tiled-threads">several</span> threads</label>
+      <label><input type="radio" name="engine" value="webgpu" disabled> WebGPU</label>
     </fieldset>
+    <p id="engine-note" class="note"></p>
+    <p id="engines-missing" class="note"></p>
     <div class="row">
       <label for="width-seams">Shrink width by</label>
       <input type="range" id="width-seams" min="0" max="0" value="0" disabled>
@@ -106,7 +145,7 @@
       <input type="number" id="height-seams-number" min="0" max="0" value="0" disabled aria-label="Shrink height by, in pixels">
       <span class="unit">px</span>
     </div>
-    <p id="status" role="status">Loading the WebAssembly module…</p>
+    <p id="status" role="status">Loading the seam carvers…</p>
   </section>
 
   <section class="images">
@@ -122,7 +161,11 @@
 </main>
 
 <script>@@SEAM_CARVER_WASM_JS@@</script>
+<!-- The multithreaded module as text: its worker threads run the same script, so it is started
+     from a Blob of this text, which it can also hand to the workers -->
+<script type="text/plain" id="tiled-seam-carver-wasm-js">@@TILED_SEAM_CARVER_WASM_JS@@</script>
 <script>@@SEAM_CARVER_JS@@</script>
+<script>@@WEBGPU_SEAM_CARVER_JS@@</script>
 <script>
 'use strict';
 
@@ -131,8 +174,9 @@ const MAX_WIDTH = 1280;
 const SEAMS_PER_STEP = 10;  // seams removed between repaints, so the page stays responsive
 
 // Counterpart of cpp_seam_carver.CppSeamCarver: an image in and out, a seam carver core in
-// between. The constructor, shrink_horizontally() and the shrunk pixels all go to the core:
-// the C++ class in the WebAssembly module, or its JavaScript port from seam_carver.js.
+// between. The constructor, shrink_horizontally() and the shrunk pixels all go to the core of
+// the selected engine. The WebGPU core answers with promises, the others right away: awaiting
+// works for both.
 class ImageSeamCarver {
   constructor(Core, imageData) {
     const { width, height, data } = imageData;
@@ -148,15 +192,15 @@ class ImageSeamCarver {
   get width() { return this.carver.width; }
   get height() { return this.carver.height; }
 
-  shrink_horizontally(pixelsToShrink, incrementalCostUpdates = true) {
+  async shrink_horizontally(pixelsToShrink, incrementalCostUpdates = true) {
     if (!Number.isInteger(pixelsToShrink) || pixelsToShrink < 0 || pixelsToShrink >= this.width) {
       throw new RangeError(`pixelsToShrink must be an integer in [0, ${this.width})`);
     }
-    this.carver.shrink_horizontally(pixelsToShrink, incrementalCostUpdates);
+    await this.carver.shrink_horizontally(pixelsToShrink, incrementalCostUpdates);
   }
 
-  get_shrunk_image() {
-    const rgb = this.carver.shrunk_rgb();
+  async get_shrunk_image() {
+    const rgb = await this.carver.shrunk_rgb();
     const image = new ImageData(this.width, this.height);
     for (let i = 0, j = 0; j < rgb.length; i += 4, j += 3) {
       image.data[i] = rgb[j];
@@ -167,7 +211,7 @@ class ImageSeamCarver {
     return image;
   }
 
-  // WebAssembly memory is not garbage collected: the C++ object must be freed explicitly
+  // WebAssembly and GPU memory are not garbage collected: the core must be freed explicitly
   // (a no-op for the JavaScript port)
   delete() { this.carver.delete(); }
 }
@@ -210,20 +254,41 @@ const axes = {
   height: { slider: $('height-seams'), number: $('height-seams-number'), target: 0 },
 };
 
-const ENGINE_NAMES = { wasm: 'the C++ core in WebAssembly', js: 'the JavaScript port' };
-let wasm = null;
-let engine = 'wasm';        // 'wasm' or 'js', from the radio buttons
+// The engines, filled in as they load. core is the class with the seam carver interface, module
+// the Emscripten module it comes from (for exception messages), note what the page says about it.
+const engines = {
+  wasm: { name: 'the C++ core in WebAssembly', core: null, module: null, note: '' },
+  js: { name: 'the JavaScript port', core: SeamCarver, module: null, note: '' },
+  tiled: {
+    name: 'C++ on several threads', core: null, module: null,
+    note: 'Every seam is a full recompute of the path costs, split over the threads by triangle ' +
+          'tiling. It removes the same seams as the other C++ engine, which only updates the costs ' +
+          'near the last seam, so it does several times less work and usually wins on one thread.',
+  },
+  webgpu: {
+    name: 'WebGPU', core: null, module: null,
+    note: 'Every seam is a full recompute on the GPU, in compute passes tiled by triangles. WGSL ' +
+          'has no 64-bit floats, so costs are 32-bit: where two paths cost almost the same, it may ' +
+          'pick the other one. On the sample picture the first seam already takes another, equally ' +
+          'cheap path in 124 of its 958 rows, and from there the results drift apart.',
+  },
+};
+let engine = 'wasm';        // key of engines, from the radio buttons
 let source = null;          // Blob of the current picture, reloaded when the downscale option changes
 let originalImage = null;   // ImageData the width carver was built from
 // The width carver removes vertical seams from the original. The height carver removes vertical
 // seams from the width carver's result turned a quarter turn, which become horizontal seams once
 // turned back. It only exists while the height should shrink, and is rebuilt when the width changes.
+// Only shrink() creates and deletes carvers: an engine may be busy across an await, and must not
+// be freed under it. Everything else asks for a rebuild.
 let widthCarver = null;
 let widthRemoved = 0;
 let rotatedWidthResult = null;
 let heightCarver = null;
 let heightRemoved = 0;
+let rebuild = false;        // the picture or the engine changed: start again from the original
 let running = false;
+let pending = false;       // a change arrived while shrink() ran: run it again
 let elapsedMs = 0;
 
 function setStatus(text, isError = false) {
@@ -233,8 +298,9 @@ function setStatus(text, isError = false) {
 
 // C++ exceptions arrive as WebAssembly exceptions; their type and message come from the module
 function describe(error) {
-  if (wasm && typeof WebAssembly.Exception === 'function' && error instanceof WebAssembly.Exception) {
-    const [type, message] = wasm.getExceptionMessage(error);
+  const module = engines[engine].module;
+  if (module && typeof WebAssembly.Exception === 'function' && error instanceof WebAssembly.Exception) {
+    const [type, message] = module.getExceptionMessage(error);
     return `${type}: ${message}`;
   }
   return error instanceof Error ? error.message : String(error);
@@ -242,9 +308,10 @@ function describe(error) {
 
 const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve)));
 
-// Seam carver core of the selected engine: both have the same interface
-function core() {
-  return engine === 'wasm' ? wasm.SeamCarver : SeamCarver;
+function selectEngine(name) {
+  engine = name;
+  document.querySelector(`input[name="engine"][value="${name}"]`).checked = true;
+  $('engine-note').textContent = engines[name].note;
 }
 
 function discardHeightCarver() {
@@ -261,9 +328,9 @@ function scaleCanvases() {
   shrunkCanvas.style.width = `calc(min(100%, ${width}px) * ${shrunkCanvas.width / width})`;
 }
 
-function drawShrunk() {
-  const image = heightCarver ? rotateCounterclockwise(heightCarver.get_shrunk_image())
-                             : widthCarver.get_shrunk_image();
+async function drawShrunk() {
+  const image = heightCarver ? rotateCounterclockwise(await heightCarver.get_shrunk_image())
+                             : await widthCarver.get_shrunk_image();
   shrunkCanvas.width = image.width;
   shrunkCanvas.height = image.height;
   shrunkCanvas.getContext('2d').putImageData(image, 0, 0);
@@ -288,25 +355,18 @@ async function loadPicture(blob) {
   bitmap.close();
   originalImage = context.getImageData(0, 0, originalCanvas.width, originalCanvas.height);
   $('original-size').textContent = `${originalImage.width} × ${originalImage.height}`;
-
-  try {
-    widthCarver?.delete();
-    discardHeightCarver();
-    widthCarver = new ImageSeamCarver(core(), originalImage);
-  } catch (error) {
-    widthCarver = null;
-    setStatus(`The picture could not be loaded into ${ENGINE_NAMES[engine]}: ${describe(error)}`, true);
-    return;
-  }
-  widthRemoved = 0;
+  rebuild = true;
   for (const [name, axis] of Object.entries(axes)) {
     const max = (name === 'width' ? originalImage.width : originalImage.height) - 1;
     for (const control of [axis.slider, axis.number]) {
       control.max = max;
       control.disabled = false;
     }
-    setTarget(axis, Math.min(axis.target, max));
+    axis.target = Math.min(axis.target, max);
+    axis.slider.value = axis.target;
+    axis.number.value = axis.target;
   }
+  shrink();
 }
 
 function setTarget(axis, value) {
@@ -317,16 +377,32 @@ function setTarget(axis, value) {
 }
 
 // Brings both carvers to the latest targets in small steps with repaints in between: first the
-// width, then the height from the width's result. New targets or a new picture during the loop
-// are picked up at the next step.
+// width, then the height from the width's result. New targets, a new picture or another engine
+// during the loop are picked up at the next step.
 async function shrink() {
-  if (running || !widthCarver) {
+  if (running || !originalImage) {
+    pending = running;
     return;
   }
   running = true;
   elapsedMs = 0;
   try {
     for (;;) {
+      pending = false;  // the targets and engine are read below
+      if (rebuild) {
+        rebuild = false;
+        widthCarver?.delete();
+        widthCarver = null;
+        discardHeightCarver();
+        widthRemoved = 0;
+        elapsedMs = 0;
+        try {
+          widthCarver = new ImageSeamCarver(engines[engine].core, originalImage);
+        } catch (error) {
+          setStatus(`The picture could not be loaded into ${engines[engine].name}: ${describe(error)}`, true);
+          return;
+        }
+      }
       const start = performance.now();
       const widthTarget = axes.width.target;
       const heightTarget = axes.height.target;
@@ -334,12 +410,12 @@ async function shrink() {
         if (widthTarget < widthRemoved) {
           // Seams can't be put back: start again from the original picture
           widthCarver.delete();
-          widthCarver = new ImageSeamCarver(core(), originalImage);
+          widthCarver = new ImageSeamCarver(engines[engine].core, originalImage);
           widthRemoved = 0;
         }
         const step = Math.min(widthTarget - widthRemoved, SEAMS_PER_STEP);
         if (step > 0) {
-          widthCarver.shrink_horizontally(step);
+          await widthCarver.shrink_horizontally(step);
           widthRemoved += step;
         }
         discardHeightCarver();  // its input, the width carver's result, just changed
@@ -350,12 +426,13 @@ async function shrink() {
       } else if (!heightCarver || heightRemoved !== heightTarget) {
         if (!heightCarver || heightTarget < heightRemoved) {
           heightCarver?.delete();
-          rotatedWidthResult ??= rotateClockwise(widthCarver.get_shrunk_image());
-          heightCarver = new ImageSeamCarver(core(), rotatedWidthResult);
+          heightCarver = null;
+          rotatedWidthResult ??= rotateClockwise(await widthCarver.get_shrunk_image());
+          heightCarver = new ImageSeamCarver(engines[engine].core, rotatedWidthResult);
           heightRemoved = 0;
         }
         const step = Math.min(heightTarget - heightRemoved, SEAMS_PER_STEP);
-        heightCarver.shrink_horizontally(step);
+        await heightCarver.shrink_horizontally(step);
         heightRemoved += step;
         setStatus(`Shrinking the height… ${heightRemoved} of ${heightTarget} px`);
       } else {
@@ -364,13 +441,17 @@ async function shrink() {
       elapsedMs += performance.now() - start;
       await nextFrame();
     }
-    drawShrunk();
+    await drawShrunk();
     setStatus(`${originalImage.width} × ${originalImage.height} → ${shrunkCanvas.width} × ${shrunkCanvas.height} px ` +
-              `in ${elapsedMs.toFixed(0)} ms with ${ENGINE_NAMES[engine]}.`);
+              `in ${elapsedMs.toFixed(0)} ms with ${engines[engine].name}.`);
   } catch (error) {
     setStatus(`Shrinking failed: ${describe(error)}`, true);
   } finally {
     running = false;
+  }
+  if (pending) {
+    pending = false;
+    shrink();  // a change arrived while the result was being drawn
   }
 }
 
@@ -392,15 +473,8 @@ $('downscale').addEventListener('change', () => source && loadPicture(source));
 // Switching engines starts both carvers again from the original picture, with the same targets
 for (const radio of document.querySelectorAll('input[name="engine"]')) {
   radio.addEventListener('change', () => {
-    engine = radio.value;
-    if (!originalImage) {
-      return;
-    }
-    widthCarver?.delete();
-    discardHeightCarver();
-    widthCarver = new ImageSeamCarver(core(), originalImage);
-    widthRemoved = 0;
-    elapsedMs = 0;
+    selectEngine(radio.value);
+    rebuild = true;
     shrink();
   });
 }
@@ -424,17 +498,64 @@ document.addEventListener('drop', (event) => {
   }
 });
 
-// Without WebAssembly the page still works with the JavaScript port
-createSeamCarverModule().then((module) => {
-  wasm = module;
+// The multithreaded module, started from a Blob of its text (see the script element above)
+async function loadTiledModule() {
+  if (!window.crossOriginIsolated) {
+    throw new Error(location.protocol === 'file:'
+      ? 'threads need a cross-origin isolated page, which a page opened from disk can\'t be. ' +
+        'Open it from a web server, such as its copy on GitHub Pages'
+      : 'threads need a cross-origin isolated page, and this browser didn\'t make it one');
+  }
+  const blob = new Blob([$('tiled-seam-carver-wasm-js').textContent], { type: 'text/javascript' });
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = URL.createObjectURL(blob);
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('its script failed to load'));
+    document.head.append(script);
+  });
+  return createTiledSeamCarverModule({ mainScriptUrlOrBlob: blob });
+}
+
+const loaders = {
+  wasm: async () => {
+    engines.wasm.module = await createSeamCarverModule();
+    engines.wasm.core = engines.wasm.module.SeamCarver;
+  },
+  tiled: async () => {
+    const module = await loadTiledModule();
+    const probe = new module.SeamCarver(new Uint8Array(3), 1, 1);
+    const threads = probe.threads;
+    probe.delete();
+    $('tiled-threads').textContent = threads;
+    Object.assign(engines.tiled, { module, core: module.SeamCarver, name: `C++ on ${threads} threads` });
+  },
+  webgpu: async () => {
+    await WebGPUSeamCarver.init();
+    engines.webgpu.core = WebGPUSeamCarver;
+  },
+};
+
+// Every engine that loads gets its radio button; the others say why not. Without WebAssembly the
+// page still works with the JavaScript port.
+Promise.all(Object.entries(loaders).map(async ([name, load]) => {
+  const radio = document.querySelector(`input[name="engine"][value="${name}"]`);
+  try {
+    await load();
+    radio.disabled = false;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    radio.disabled = true;
+    radio.parentElement.title = `Not available: ${reason}`;
+    engines[name].unavailable = reason;
+    console.warn(`${engines[name].name} is not available:`, error);
+  }
+})).then(async () => {
   // Browsers may restore the radio button chosen before a reload without a change event
-  engine = document.querySelector('input[name="engine"]:checked').value;
-}, (error) => {
-  engine = 'js';
-  document.querySelector('input[name="engine"][value="js"]').checked = true;
-  document.querySelector('input[name="engine"][value="wasm"]').disabled = true;
-  console.warn('WebAssembly module failed to load, using the JavaScript port:', error);
-}).then(async () => {
+  const restored = document.querySelector('input[name="engine"]:checked')?.value;
+  selectEngine(engines[restored]?.core ? restored : engines.wasm.core ? 'wasm' : 'js');
+  $('engines-missing').textContent = Object.values(engines).filter((e) => e.unavailable)
+    .map((e) => `${e.name[0].toUpperCase()}${e.name.slice(1)} is not available: ${e.unavailable}.`).join(' ');
   setStatus('Ready. Loading the sample picture…');
   await loadPicture(await (await fetch(SAMPLE_IMAGE)).blob());
 });

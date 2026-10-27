@@ -10,6 +10,7 @@ on:
     paths:
       - 'wasm_seam_carver/**'
       - 'seam_carver_core/**'
+      - 'parallel_seam_carver/**'
       - 'tundra_1280x958.jpeg'
       - '.github/workflows/pages.yml'
   workflow_dispatch:  # also runs from the Actions tab
@@ -42,11 +43,13 @@ jobs:
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           wasm_seam_carver/build.sh
 
-      # The page is self-contained: one file is the whole site
+      # The page is self-contained, plus the service worker that makes it cross-origin isolated
+      # for the multithreaded engine, which GitHub Pages' own headers can't
       - name: Collect the site
         run: |
           mkdir site
           cp wasm_seam_carver/seam_carver.html site/index.html
+          cp wasm_seam_carver/isolation_service_worker.js site/
 
       - uses: actions/upload-pages-artifact@v3
         with:

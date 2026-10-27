@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds seam_carver.html: a standalone page running the C++ core from ../seam_carver_core,
-# compiled to WebAssembly with Emscripten (sudo apt install emscripten). The page opens straight
-# from disk, no web server needed.
+# compiled to WebAssembly with Emscripten (sudo apt install emscripten), its JavaScript port,
+# a multithreaded C++ engine and a WebGPU engine. The page opens straight from disk, no web server
+# needed; only the multithreaded engine needs one (see isolation_service_worker.js).
 set -e
 cd "$(dirname "$0")"
 mkdir -p build
@@ -17,19 +18,38 @@ em++ -O3 -std=c++17 -Wall -Wextra -fwasm-exceptions -I../seam_carver_core \
     -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=4GB -sSINGLE_FILE \
     -o build/seam_carver_wasm.js
 
-# Inline the module, the JavaScript port and the sample picture into the page template
+# The multithreaded engine, ../parallel_seam_carver/tiled_seam_carver.hpp, with the same flags plus:
+# -pthread: shared memory and std::thread on Web Workers; the page needs cross-origin isolation
+# -sPTHREAD_POOL_SIZE: workers started with the module, one fewer than the threads a carver uses
+#   (kMaxThreads in tiled_seam_carver_wasm.cpp), since the calling thread works too
+# -sPTHREAD_POOL_SIZE_STRICT=2: a thread beyond the pool fails instead of deadlocking the page
+# -sENVIRONMENT=...,worker: the workers run this module's script too
+# -sMAXIMUM_MEMORY=2GB: shared memory reserves its maximum up front, keep it modest
+# -Wno-pthreads-mem-growth: growing shared memory slows JavaScript access to it, which only
+#   copies the picture in and out here
+em++ -O3 -std=c++20 -Wall -Wextra -pthread -fwasm-exceptions -I../parallel_seam_carver \
+    tiled_seam_carver_wasm.cpp \
+    -lembind -fwasm-exceptions -sEXPORT_EXCEPTION_HANDLING_HELPERS \
+    -sMODULARIZE -sEXPORT_NAME=createTiledSeamCarverModule -sENVIRONMENT=web,worker,node \
+    '-sPTHREAD_POOL_SIZE=Math.min(navigator.hardwareConcurrency,8)-1' -sPTHREAD_POOL_SIZE_STRICT=2 \
+    -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=2GB -Wno-pthreads-mem-growth -sSINGLE_FILE \
+    -o build/tiled_seam_carver_wasm.js
+
+# Inline the modules, the JavaScript engines and the sample picture into the page template
 python3 - <<'EOF'
 import base64
 from pathlib import Path
 
-module = Path('build/seam_carver_wasm.js').read_text()
-# A literal "</script" anywhere in the module would end the inline <script> element early
-module = module.replace('</script', '<\\/script')
+def script(path):
+    # A literal "</script" anywhere in the code would end the inline <script> element early
+    return Path(path).read_text().replace('</script', '<\\/script')
+
 sample = base64.b64encode(Path('../tundra_1280x958.jpeg').read_bytes()).decode()
 page = Path('seam_carver.template.html').read_text()
-port = Path('seam_carver.js').read_text().replace('</script', '<\\/script')  # JavaScript port of the core
-for placeholder, value in (('@@SEAM_CARVER_WASM_JS@@', module),
-                           ('@@SEAM_CARVER_JS@@', port),
+for placeholder, value in (('@@SEAM_CARVER_WASM_JS@@', script('build/seam_carver_wasm.js')),
+                           ('@@TILED_SEAM_CARVER_WASM_JS@@', script('build/tiled_seam_carver_wasm.js')),
+                           ('@@SEAM_CARVER_JS@@', script('seam_carver.js')),  # JavaScript port of the core
+                           ('@@WEBGPU_SEAM_CARVER_JS@@', script('webgpu_seam_carver.js')),
                            ('@@SAMPLE_IMAGE_DATA_URL@@', 'data:image/jpeg;base64,' + sample)):
     assert page.count(placeholder) == 1, placeholder
     page = page.replace(placeholder, value)

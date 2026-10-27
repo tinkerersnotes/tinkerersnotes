@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "seam_carver_impl.hpp"
+#include "tiled_seam_carver.hpp"
 
 #ifndef CHECK
 #define CHECK 0
@@ -304,6 +305,12 @@ int main(int argc, char** argv) {
             out = run_serial(im, seams, ms);
         } else if (mode == "tiled") {
             out = run_tiled(im, seams, threads, base, ms);
+        } else if (mode == "class") {   // the same tiling as a class, tiled_seam_carver.hpp
+            seam_carving::TiledSeamCarver carver(im.rgb.data(), im.width, im.height, threads, base);
+            const auto t = std::chrono::steady_clock::now();
+            carver.shrink_horizontally(seams);
+            ms = ms_since(t);
+            out = carver.shrunk_rgb();
         } else {
             std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
             return 2;
@@ -313,8 +320,9 @@ int main(int argc, char** argv) {
                 .write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
         }
         if (reference.empty()) reference = out;
+        const bool tiling = mode == "tiled" || mode == "class";
         std::printf("%-17s threads=%-2d base=%-4d %8.0f ms   identical to %s: %s\n", mode.c_str(),
-                    mode == "tiled" ? threads : 1, mode == "tiled" ? base : 0, ms, argv[7],
+                    tiling ? threads : 1, tiling ? base : 0, ms, argv[7],
                     out == reference ? "yes" : "NO");
     }
 }
