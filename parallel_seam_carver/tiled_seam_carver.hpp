@@ -17,7 +17,8 @@
 #pragma once
 
 #include <algorithm>
-#include <barrier>
+#include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +27,57 @@
 #include <thread>
 #include <vector>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/threading.h>
+#endif
+
 namespace seam_carving {
+
+// Barrier whose waiting threads spin briefly, then sleep until the last one arrives.
+// std::barrier in WebAssembly spins for up to ~64 us per wait instead, asking JavaScript for the
+// time as it goes: with more threads than free cores, the spinning threads take the CPU from the
+// ones still working. In the browser, 8 threads on 2 cores took 2.5x as long as 2 threads with
+// std::barrier, and as long as 2 threads with this one.
+class SleepingBarrier {
+public:
+    explicit SleepingBarrier(int count) : count_(count) {}
+
+    void arrive_and_wait() {
+        const int phase = phase_.load(std::memory_order_acquire);
+        if (arrived_.fetch_add(1, std::memory_order_acq_rel) + 1 == count_) {
+            // Last to arrive: the reset happens before the release, so it is seen by every thread
+            // that sees the new phase
+            arrived_.store(0, std::memory_order_relaxed);
+            phase_.store(phase + 1, std::memory_order_release);
+            wake_all();
+            return;
+        }
+        for (int i = 0; i < kSpins; ++i) {
+            if (phase_.load(std::memory_order_acquire) != phase) {
+                return;
+            }
+        }
+        while (phase_.load(std::memory_order_acquire) == phase) {
+            sleep_while(phase);
+        }
+    }
+
+private:
+    static constexpr int kSpins = 1000;  // a few microseconds: the others are often about to arrive
+
+#ifdef __EMSCRIPTEN__
+    // Atomics.wait and Atomics.notify; a worker sleeps, a browser's main thread would spin
+    void sleep_while(int phase) { emscripten_futex_wait(&phase_, static_cast<std::uint32_t>(phase), INFINITY); }
+    void wake_all() { emscripten_futex_wake(&phase_, INT_MAX); }
+#else
+    void sleep_while(int phase) { phase_.wait(phase, std::memory_order_acquire); }
+    void wake_all() { phase_.notify_all(); }
+#endif
+
+    std::atomic<int> arrived_{0};
+    std::atomic<int> phase_{0};
+    const int count_;
+};
 
 class TiledSeamCarver {
 public:
@@ -58,7 +109,7 @@ public:
         if (pixels_to_shrink == 0) {
             return;
         }
-        std::barrier sync(threads_);
+        SleepingBarrier sync(threads_);
         auto worker = [&](int tid) {
             for (int s = 0; s < pixels_to_shrink; ++s) {
                 remove_seam(tid, sync);
@@ -141,7 +192,7 @@ private:
     }
 
     // One seam, run by every thread. width_ only changes between barriers.
-    void remove_seam(int tid, std::barrier<>& sync) {
+    void remove_seam(int tid, SleepingBarrier& sync) {
         const int w = width_;
         const int tasks = (w + base_ - 1) / base_;
         const int h = base_ / 2;

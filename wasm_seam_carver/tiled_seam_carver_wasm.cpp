@@ -1,18 +1,22 @@
 // Embind bindings: exposes seam_carving::TiledSeamCarver from ../parallel_seam_carver to
-// JavaScript, with the same interface as seam_carver_wasm.cpp. Built with -pthread, so its
-// memory is a SharedArrayBuffer: browsers only allow that on cross-origin isolated pages.
+// JavaScript, with the same interface as seam_carver_wasm.cpp plus a thread count. Built with
+// -pthread, so its memory is a SharedArrayBuffer: browsers only allow that on cross-origin
+// isolated pages.
+//
+// The page runs this module in a dedicated Web Worker (tiled_seam_carver_worker.js), never on
+// its main thread: a browser's main thread may not sleep, so Emscripten makes it spin at every
+// barrier, which burns a core the other threads need and freezes the page.
 //
 // The thread pool is started with the module (PTHREAD_POOL_SIZE in build.sh), since a thread
-// started on demand needs the main thread's event loop, which is blocked while seams are removed.
-// The calling thread works too, so a carver uses one thread more than the pool has workers.
+// started on demand needs the event loop of the thread that started it, which is busy while
+// seams are removed. The calling thread works too, so a carver may use one thread more than the
+// pool has workers.
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 #include "tiled_seam_carver.hpp"
@@ -21,20 +25,14 @@ namespace {
 
 using seam_carving::TiledSeamCarver;
 
-// Must match PTHREAD_POOL_SIZE in build.sh: at most this many threads, the pool has one fewer
-constexpr int kMaxThreads = 8;
-
-int thread_count() {
-    return std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, kMaxThreads);
-}
-
-// JavaScript passes the pixels as a Uint8Array of row-major RGB bytes
-TiledSeamCarver* create_tiled_seam_carver(const emscripten::val& rgb, int width, int height) {
+// JavaScript passes the pixels as a Uint8Array of row-major RGB bytes. threads must not exceed
+// the pool's workers plus one, or starting a thread fails (PTHREAD_POOL_SIZE_STRICT in build.sh).
+TiledSeamCarver* create_tiled_seam_carver(const emscripten::val& rgb, int width, int height, int threads) {
     const std::vector<std::uint8_t> bytes = emscripten::convertJSArrayToNumberVector<std::uint8_t>(rgb);
     if (width <= 0 || height <= 0 || bytes.size() != static_cast<std::size_t>(width) * height * 3) {
         throw std::invalid_argument("rgb must hold width * height * 3 bytes");
     }
-    return new TiledSeamCarver(bytes.data(), width, height, thread_count());
+    return new TiledSeamCarver(bytes.data(), width, height, threads);
 }
 
 // Every seam is a full recompute: the flag the other engines take is accepted and ignored

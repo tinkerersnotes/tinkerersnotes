@@ -82,7 +82,7 @@
   fieldset.row { border: 0; margin: 0; padding: 0; }
   /* A legend can't be a flex item: floating it puts it in the row with the radio buttons */
   fieldset.row > legend { float: left; padding: 0; margin-right: 12px; }
-  button, input[type="number"] {
+  button, input[type="number"], select {
     font: inherit;
     color: var(--text);
     background: var(--surface);
@@ -128,7 +128,8 @@
       <legend>Seam carver</legend>
       <label><input type="radio" name="engine" value="wasm" checked disabled> C++ core in WebAssembly</label>
       <label><input type="radio" name="engine" value="js"> JavaScript port</label>
-      <label><input type="radio" name="engine" value="tiled" disabled> C++ on <span id="tiled-threads">several</span> threads</label>
+      <label><input type="radio" name="engine" value="tiled" disabled> C++ on
+        <select id="tiled-threads" disabled aria-label="Threads"><option>several</option></select> threads</label>
       <label><input type="radio" name="engine" value="webgpu" disabled> WebGPU</label>
     </fieldset>
     <p id="engine-note" class="note"></p>
@@ -161,9 +162,10 @@
 </main>
 
 <script>@@SEAM_CARVER_WASM_JS@@</script>
-<!-- The multithreaded module as text: its worker threads run the same script, so it is started
-     from a Blob of this text, which it can also hand to the workers -->
+<!-- The multithreaded module and the Web Worker that runs it, as text: both start from Blobs of
+     this text, and the module's own worker threads run the module's script too -->
 <script type="text/plain" id="tiled-seam-carver-wasm-js">@@TILED_SEAM_CARVER_WASM_JS@@</script>
+<script type="text/plain" id="tiled-seam-carver-worker-js">@@TILED_SEAM_CARVER_WORKER_JS@@</script>
 <script>@@SEAM_CARVER_JS@@</script>
 <script>@@WEBGPU_SEAM_CARVER_JS@@</script>
 <script>
@@ -253,6 +255,76 @@ const axes = {
   width: { slider: $('width-seams'), number: $('width-seams-number'), target: 0 },
   height: { slider: $('height-seams'), number: $('height-seams-number'), target: 0 },
 };
+
+// The multithreaded engine with the seam carver interface. The module runs in a Web Worker
+// (tiled_seam_carver_worker.js), so its calling thread can sleep at barriers instead of spinning
+// on the page's main thread; every call is a message, so shrinking and reading back are promises.
+class ThreadedSeamCarver {
+  static worker = null;
+  static requests = new Map();  // request id -> { resolve, reject }
+  static nextId = 0;
+  static carvers = 0;
+  static maxThreads = 1;
+  static threads = 1;           // used by carvers created from now on
+
+  static request(message, transfer = []) {
+    const id = ++ThreadedSeamCarver.nextId;
+    return new Promise((resolve, reject) => {
+      ThreadedSeamCarver.requests.set(id, { resolve, reject });
+      ThreadedSeamCarver.worker.postMessage({ ...message, id }, transfer);
+    });
+  }
+
+  // Starts the worker and the module with a pool for maxThreads threads
+  static async init(maxThreads) {
+    const text = (id) => new Blob([$(id).textContent], { type: 'text/javascript' });
+    const worker = new Worker(URL.createObjectURL(text('tiled-seam-carver-worker-js')), { name: 'seam-carver' });
+    worker.onmessage = ({ data }) => {
+      const request = ThreadedSeamCarver.requests.get(data.id);
+      ThreadedSeamCarver.requests.delete(data.id);
+      if (data.error !== undefined) {
+        request.reject(new Error(data.error));
+      } else {
+        request.resolve(data.result);
+      }
+    };
+    worker.onerror = (event) => console.error('Seam carver worker:', event.message);
+    ThreadedSeamCarver.worker = worker;
+    await ThreadedSeamCarver.request({ op: 'init', moduleUrl: URL.createObjectURL(text('tiled-seam-carver-wasm-js')), maxThreads });
+    ThreadedSeamCarver.maxThreads = ThreadedSeamCarver.threads = maxThreads;
+  }
+
+  // rgb is a row-major Uint8Array of width * height * 3 bytes; it moves to the worker
+  constructor(rgb, width, height) {
+    if (!rgb || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+      throw new RangeError('image must be non-empty');
+    }
+    if (rgb.length !== width * height * 3) {
+      throw new RangeError('rgb must hold width * height * 3 bytes');
+    }
+    this._width = width;
+    this._height = height;
+    this.id = ++ThreadedSeamCarver.carvers;
+    // A failure surfaces at the carver's next request, which the worker answers with the same error
+    ThreadedSeamCarver.request({ op: 'create', carver: this.id, rgb, width, height, threads: ThreadedSeamCarver.threads },
+                               [rgb.buffer]).catch(() => {});
+  }
+
+  get width() { return this._width; }
+  get height() { return this._height; }
+
+  async shrink_horizontally(pixelsToShrink) {
+    if (!Number.isInteger(pixelsToShrink) || pixelsToShrink < 0 || pixelsToShrink >= this._width) {
+      throw new RangeError('pixels_to_shrink must be in [0, width)');
+    }
+    await ThreadedSeamCarver.request({ op: 'shrink', carver: this.id, pixels: pixelsToShrink });
+    this._width -= pixelsToShrink;
+  }
+
+  shrunk_rgb() { return ThreadedSeamCarver.request({ op: 'rgb', carver: this.id }); }
+
+  delete() { ThreadedSeamCarver.request({ op: 'delete', carver: this.id }).catch(() => {}); }
+}
 
 // The engines, filled in as they load. core is the class with the seam carver interface, module
 // the Emscripten module it comes from (for exception messages), note what the page says about it.
@@ -498,38 +570,43 @@ document.addEventListener('drop', (event) => {
   }
 });
 
-// The multithreaded module, started from a Blob of its text (see the script element above)
-async function loadTiledModule() {
+// The multithreaded engine, in a Web Worker started from Blobs of the texts above. Its thread pool
+// is as large as the processor count, at most 8, or ?threads=N in the address (to try more threads
+// than processors); the menu chooses how many of them a carver uses.
+async function loadThreadedEngine() {
   if (!window.crossOriginIsolated) {
     throw new Error(location.protocol === 'file:'
       ? 'threads need a cross-origin isolated page, which a page opened from disk can\'t be. ' +
         'Open it from a web server, such as its copy on GitHub Pages'
       : 'threads need a cross-origin isolated page, and this browser didn\'t make it one');
   }
-  const blob = new Blob([$('tiled-seam-carver-wasm-js').textContent], { type: 'text/javascript' });
-  await new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = URL.createObjectURL(blob);
-    script.onload = resolve;
-    script.onerror = () => reject(new Error('its script failed to load'));
-    document.head.append(script);
-  });
-  return createTiledSeamCarverModule({ mainScriptUrlOrBlob: blob });
+  const requested = Number(new URLSearchParams(location.search).get('threads'));
+  const maxThreads = Number.isInteger(requested) && requested >= 1 && requested <= 64
+    ? requested : Math.max(1, Math.min(navigator.hardwareConcurrency || 1, 8));
+  await ThreadedSeamCarver.init(maxThreads);
+  const menu = $('tiled-threads');
+  menu.replaceChildren(...Array.from({ length: maxThreads }, (_, i) => new Option(i + 1, i + 1)));
+  menu.value = maxThreads;
+  menu.disabled = false;
+  engines.tiled.name = `C++ on ${maxThreads} threads`;
+  engines.tiled.core = ThreadedSeamCarver;
 }
+
+// Another thread count starts the multithreaded engine again from the original picture
+$('tiled-threads').addEventListener('change', () => {
+  ThreadedSeamCarver.threads = Number($('tiled-threads').value);
+  engines.tiled.name = `C++ on ${ThreadedSeamCarver.threads} thread${ThreadedSeamCarver.threads > 1 ? 's' : ''}`;
+  selectEngine('tiled');
+  rebuild = true;
+  shrink();
+});
 
 const loaders = {
   wasm: async () => {
     engines.wasm.module = await createSeamCarverModule();
     engines.wasm.core = engines.wasm.module.SeamCarver;
   },
-  tiled: async () => {
-    const module = await loadTiledModule();
-    const probe = new module.SeamCarver(new Uint8Array(3), 1, 1);
-    const threads = probe.threads;
-    probe.delete();
-    $('tiled-threads').textContent = threads;
-    Object.assign(engines.tiled, { module, core: module.SeamCarver, name: `C++ on ${threads} threads` });
-  },
+  tiled: loadThreadedEngine,
   webgpu: async () => {
     await WebGPUSeamCarver.init();
     engines.webgpu.core = WebGPUSeamCarver;

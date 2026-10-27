@@ -20,8 +20,8 @@ em++ -O3 -std=c++17 -Wall -Wextra -fwasm-exceptions -I../seam_carver_core \
 
 # The multithreaded engine, ../parallel_seam_carver/tiled_seam_carver.hpp, with the same flags plus:
 # -pthread: shared memory and std::thread on Web Workers; the page needs cross-origin isolation
-# -sPTHREAD_POOL_SIZE: workers started with the module, one fewer than the threads a carver uses
-#   (kMaxThreads in tiled_seam_carver_wasm.cpp), since the calling thread works too
+# -sPTHREAD_POOL_SIZE: workers started with the module, Module.poolSize from the page (one fewer
+#   than the most threads a carver may use, since the calling thread works too)
 # -sPTHREAD_POOL_SIZE_STRICT=2: a thread beyond the pool fails instead of deadlocking the page
 # -sENVIRONMENT=...,worker: the workers run this module's script too
 # -sMAXIMUM_MEMORY=2GB: shared memory reserves its maximum up front, keep it modest
@@ -31,7 +31,7 @@ em++ -O3 -std=c++20 -Wall -Wextra -pthread -fwasm-exceptions -I../parallel_seam_
     tiled_seam_carver_wasm.cpp \
     -lembind -fwasm-exceptions -sEXPORT_EXCEPTION_HANDLING_HELPERS \
     -sMODULARIZE -sEXPORT_NAME=createTiledSeamCarverModule -sENVIRONMENT=web,worker,node \
-    '-sPTHREAD_POOL_SIZE=Math.min(navigator.hardwareConcurrency,8)-1' -sPTHREAD_POOL_SIZE_STRICT=2 \
+    '-sPTHREAD_POOL_SIZE=Module.poolSize??Math.min(navigator.hardwareConcurrency,8)-1' -sPTHREAD_POOL_SIZE_STRICT=2 \
     -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=2GB -Wno-pthreads-mem-growth -sSINGLE_FILE \
     -o build/tiled_seam_carver_wasm.js
 
@@ -48,6 +48,7 @@ sample = base64.b64encode(Path('../tundra_1280x958.jpeg').read_bytes()).decode()
 page = Path('seam_carver.template.html').read_text()
 for placeholder, value in (('@@SEAM_CARVER_WASM_JS@@', script('build/seam_carver_wasm.js')),
                            ('@@TILED_SEAM_CARVER_WASM_JS@@', script('build/tiled_seam_carver_wasm.js')),
+                           ('@@TILED_SEAM_CARVER_WORKER_JS@@', script('tiled_seam_carver_worker.js')),
                            ('@@SEAM_CARVER_JS@@', script('seam_carver.js')),  # JavaScript port of the core
                            ('@@WEBGPU_SEAM_CARVER_JS@@', script('webgpu_seam_carver.js')),
                            ('@@SAMPLE_IMAGE_DATA_URL@@', 'data:image/jpeg;base64,' + sample)):
