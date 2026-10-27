@@ -113,11 +113,17 @@ bool SeamCarver::update_cost_if_needed(MeshNode* to_node) {
         }
     }
 
-    if (!(achievable_cost * 0.9999 <= to_node->cost && to_node->cost <= achievable_cost * 1.0001)) {
+    // Compared exactly on purpose: with unchanged parents the recomputed cost is bit-identical,
+    // so only real changes propagate. A tolerance let stale costs and paths survive and drift
+    // from a full recompute.
+    if (to_node->cost != achievable_cost) {
         to_node->cost = achievable_cost;
         to_node->prev = best_parent;
         return true;
     }
+    // Same cost: still take the parent a full recompute picks on a tie. Children only read
+    // the cost, so nothing below needs updating.
+    to_node->prev = best_parent;
     return false;
 }
 

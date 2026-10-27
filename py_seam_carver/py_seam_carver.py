@@ -163,11 +163,17 @@ class PySeamCarver:
                 achievable_cost = cost
                 best_parent = up.right
 
-        if not (achievable_cost * 0.9999 <= to_node.cost <= achievable_cost * 1.0001):
+        # Compared exactly on purpose: with unchanged parents the recomputed cost is identical,
+        # so only real changes propagate. A tolerance let stale costs and paths survive and
+        # drift from a full recompute.
+        if to_node.cost != achievable_cost:
             to_node.cost = achievable_cost
             to_node.prev = best_parent
             return True
 
+        # Same cost: still take the parent a full recompute picks on a tie. Children only
+        # read the cost, so nothing below needs updating.
+        to_node.prev = best_parent
         return False
 
     # A node may be queued twice (as a seam neighbour and after its cost changed),

@@ -1,7 +1,8 @@
 # Seam carver: an optimization journey across Python, Cython and native code
 
 One algorithm, five Python-importable flavors, and a series of measured optimizations.
-Every step was verified to produce pixel-identical output across all modules.
+Every step was verified to produce pixel-identical output across all modules. Since step 12,
+incremental cost updates also produce exactly the same output as a full recompute.
 
 ## Setup
 
@@ -341,6 +342,60 @@ installed, only its C compiler survived) or hardware counters, which this VM doe
 The pure-Python slowdown has a separate cause: Python 3.14 itself. Shrinking got 18% slower
 while construction got 30% faster.
 
+## 12. Exact incremental updates: no tolerance, and the same parent on ties
+
+**Observation.** All modules agreed with each other, but not with themselves: an incremental run
+and a full-recompute run of the same module removed different seams. A probe ran the C++ core
+both ways in lockstep, one seam at a time, and compared the pictures after every seam. On tundra
+the first difference came at seam 9: the incremental update removed a seam costing 1521.41,
+while the cheapest seam cost 1507.56, 0.9% less. From there the two runs drift apart, because
+each removed seam changes the picture the next one is chosen from.
+
+**Root causes.** Both are in `update_cost_if_needed`, the function that re-evaluates one node:
+
+- **A ±0.01% tolerance.** A node's cost was rewritten only when the recomputed cost differed by
+  more than 0.01% (`achievable_cost * 0.9999 <= cost <= achievable_cost * 1.0001`). A smaller
+  change stopped propagating there, and the node kept its old cost and its old `prev`. Its
+  children were then computed from the stale cost, so errors could add up row after row over 958
+  rows, far beyond 0.01%.
+- **Ties.** Both paths pick the first cheapest parent in the order `up`, `up.left`,
+  `up.right`. When a node's cost did not change, the incremental update returned without
+  touching `prev`, so the node could keep a parent that ties with the one a full recompute
+  picks. Same cost, different seam: the seam is traced back through `prev`, so other pixels get
+  removed. Ties are common wherever neighbouring pixels have the same colour.
+
+**Change**, in all four implementations (C++ core, Cython, pure Python, JavaScript):
+
+- Costs are compared exactly (`!=`). That is safe: when none of a node's parents changed, the
+  recomputed cost is the same sum of the same doubles in the same order, so it is bit-identical
+  and nothing propagates.
+- When the cost is unchanged, `prev` is still set to the best parent. Children read only the
+  parent's cost, never its `prev`, so this queues no extra work.
+
+**Results.** First seam where the incremental and full-recompute pictures differ:
+
+| Picture | Seams | Original | Tolerance removed | Tolerance removed + ties fixed | Work of exact incremental vs full recompute |
+|---|---|---|---|---|---|
+| Tundra, 1280×958 | 600 | seam 9 | seam 16 | **none** | 12.8% |
+| Tundra crop, 400×300 | 250 | seam 7 | seam 7 | **none** | 21.6% |
+| Posterized, 400×300, 16 colours | 250 | seam 10 | seam 10 | **none** | 1.6% |
+| Flat blocks, 400×300, 38 colours | 250 | seam 3 | seam 6 | **none** | 13.5% |
+
+Each fix alone is not enough. Removing the tolerance only delays the first difference, or not
+even that, on the pictures with many equal colours. Only both together make every seam match.
+"Work" counts the nodes the incremental update evaluates against the nodes a full recompute
+would evaluate for the same seams.
+
+**Cost.** The exact version evaluates slightly more nodes (12.8% of a full recompute on tundra,
+against 12.4% before; the two runs remove different seams, so this is only a rough comparison).
+In a Linux VM on the same Mac (4 cores, g++ 11.4), the C++ core took about 1.53 s for 600 seams
+against 1.51 s before, about 1% more.
+
+**Verified** on Linux x86-64 with Python 3.13: `PySeamCarver`, `CySeamCarver`, `CppSeamCarver`,
+`CSeamCarver`, `CtypesSeamCarver` and the JavaScript port (in Node.js), each with incremental
+updates, produce byte-for-byte the same 680×958 picture after 600 seams as `CppSeamCarver` with
+a full recompute.
+
 ---
 
 ## Lessons
@@ -364,6 +419,11 @@ while construction got 30% faster.
 9. **Re-measure after every toolchain upgrade.** The same code moved by −3% to +17% from
    Ubuntu 24.04 to 26.04, differently for each flavor. Keep the old build around until the
    comparison is done: once it is gone, a direct before/after comparison is impossible.
+10. **An incremental algorithm needs exact checks, not a tolerance.** It is only correct if it
+    reaches the same state as a full recompute, ties included. A "harmless" 0.01% tolerance let
+    errors add up across rows and change which seam was removed, while saving almost no work.
+    Testing incremental against full recompute seam by seam is what found it: comparing
+    modules with each other could not, because they all shared the bug.
 
 ## Measured but not applied
 

@@ -150,11 +150,17 @@ class SeamCarver {
       }
     }
 
-    if (!(achievable_cost * 0.9999 <= cost[to_node] && cost[to_node] <= achievable_cost * 1.0001)) {
+    // Compared exactly on purpose: with unchanged parents the recomputed cost is bit-identical,
+    // so only real changes propagate. A tolerance let stale costs and paths survive and drift
+    // from a full recompute.
+    if (cost[to_node] !== achievable_cost) {
       cost[to_node] = achievable_cost;
       prev[to_node] = best_parent;
       return true;
     }
+    // Same cost: still take the parent a full recompute picks on a tie. Children only read
+    // the cost, so nothing below needs updating.
+    prev[to_node] = best_parent;
     return false;
   }
 
