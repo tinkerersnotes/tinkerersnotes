@@ -47,7 +47,7 @@ self.onmessage = async ({ data }) => {
         break;
       case 'create':
         try {
-          carvers.set(data.carver, new module.SeamCarver(data.rgb, data.width, data.height, data.threads));
+          carvers.set(data.carver, new module.SeamCarver(data.rgb, data.width, data.height, data.threads, data.spins));
         } catch (error) {
           carvers.set(data.carver, new Error(describe(error)));  // reported by the carver's next request
           throw error;

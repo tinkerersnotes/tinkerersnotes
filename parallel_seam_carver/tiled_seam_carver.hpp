@@ -33,14 +33,28 @@
 
 namespace seam_carving {
 
-// Barrier whose waiting threads spin briefly, then sleep until the last one arrives.
-// std::barrier in WebAssembly spins for up to ~64 us per wait instead, asking JavaScript for the
-// time as it goes: with more threads than free cores, the spinning threads take the CPU from the
-// ones still working. In the browser, 8 threads on 2 cores took 2.5x as long as 2 threads with
-// std::barrier, and as long as 2 threads with this one.
+// Barrier whose waiting threads spin a while, then sleep until the last one arrives.
+// std::barrier in WebAssembly spins for up to ~64 us per wait, asking JavaScript for the time as
+// it goes: with more threads than free cores, the spinning threads take the CPU from the ones
+// still working. In Chromium, 8 threads on 2 cores took 2.5x as long as 2 threads with
+// std::barrier, and about as long as 2 threads with this one.
+//
+// Spinning too briefly costs the other way: every barrier then pays for waking sleeping threads,
+// which some browsers do slowly (Safari got much slower with 1000 spins). One check takes about
+// 0.5 ns in WebAssembly: 20000 spins, ~10 us, cost 2 threads nothing and 8 threads on 2 cores
+// about 10% in Chromium; 100000 (~50 us, close to std::barrier) cost them 30%, a million 3.6x.
+// The page's ?spins=N overrides the default to compare browsers. Natively the C++20 atomic wait
+// spins and yields on its own, and longer spinning only hurt (8 threads on 2 cores: 2.7x slower).
 class SleepingBarrier {
 public:
-    explicit SleepingBarrier(int count) : count_(count) {}
+#ifdef __EMSCRIPTEN__
+    static constexpr int kDefaultSpins = 20000;
+#else
+    static constexpr int kDefaultSpins = 1000;
+#endif
+
+    // spins: checks of the phase before sleeping
+    SleepingBarrier(int count, int spins) : count_(count), spins_(spins) {}
 
     void arrive_and_wait() {
         const int phase = phase_.load(std::memory_order_acquire);
@@ -52,7 +66,7 @@ public:
             wake_all();
             return;
         }
-        for (int i = 0; i < kSpins; ++i) {
+        for (int i = 0; i < spins_; ++i) {
             if (phase_.load(std::memory_order_acquire) != phase) {
                 return;
             }
@@ -63,8 +77,6 @@ public:
     }
 
 private:
-    static constexpr int kSpins = 1000;  // a few microseconds: the others are often about to arrive
-
 #ifdef __EMSCRIPTEN__
     // Atomics.wait and Atomics.notify; a worker sleeps, a browser's main thread would spin
     void sleep_while(int phase) { emscripten_futex_wait(&phase_, static_cast<std::uint32_t>(phase), INFINITY); }
@@ -77,13 +89,15 @@ private:
     std::atomic<int> arrived_{0};
     std::atomic<int> phase_{0};
     const int count_;
+    const int spins_;
 };
 
 class TiledSeamCarver {
 public:
     // rgb is a row-major buffer of width * height * 3 bytes
-    TiledSeamCarver(const std::uint8_t* rgb, int width, int height, int threads, int base = 128)
-        : stride_(width), width_(width), height_(height), threads_(threads), base_(base) {
+    TiledSeamCarver(const std::uint8_t* rgb, int width, int height, int threads, int base = 128,
+                    int spins = SleepingBarrier::kDefaultSpins)
+        : stride_(width), width_(width), height_(height), threads_(threads), base_(base), spins_(spins) {
         if (rgb == nullptr || width <= 0 || height <= 0) {
             throw std::invalid_argument("image must be non-empty");
         }
@@ -109,7 +123,7 @@ public:
         if (pixels_to_shrink == 0) {
             return;
         }
-        SleepingBarrier sync(threads_);
+        SleepingBarrier sync(threads_, spins_);
         auto worker = [&](int tid) {
             for (int s = 0; s < pixels_to_shrink; ++s) {
                 remove_seam(tid, sync);
@@ -259,6 +273,7 @@ private:
     int height_;
     int threads_;
     int base_;
+    int spins_;  // barrier checks before sleeping
     std::vector<std::uint8_t> rgb_;
     std::vector<double> cost_;
     std::vector<std::int8_t> prev_;

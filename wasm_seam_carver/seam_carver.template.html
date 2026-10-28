@@ -266,6 +266,7 @@ class ThreadedSeamCarver {
   static carvers = 0;
   static maxThreads = 1;
   static threads = 1;           // used by carvers created from now on
+  static spins = -1;            // barrier checks before sleeping, ?spins=N in the address; -1: default
 
   static request(message, transfer = []) {
     const id = ++ThreadedSeamCarver.nextId;
@@ -306,7 +307,7 @@ class ThreadedSeamCarver {
     this._height = height;
     this.id = ++ThreadedSeamCarver.carvers;
     // A failure surfaces at the carver's next request, which the worker answers with the same error
-    ThreadedSeamCarver.request({ op: 'create', carver: this.id, rgb, width, height, threads: ThreadedSeamCarver.threads },
+    ThreadedSeamCarver.request({ op: 'create', carver: this.id, rgb, width, height, threads: ThreadedSeamCarver.threads, spins: ThreadedSeamCarver.spins },
                                [rgb.buffer]).catch(() => {});
   }
 
@@ -572,7 +573,8 @@ document.addEventListener('drop', (event) => {
 
 // The multithreaded engine, in a Web Worker started from Blobs of the texts above. Its thread pool
 // is as large as the processor count, at most 8, or ?threads=N in the address (to try more threads
-// than processors); the menu chooses how many of them a carver uses.
+// than processors); the menu chooses how many of them a carver uses. ?spins=N sets how often a
+// thread checks a barrier before it sleeps (SleepingBarrier in tiled_seam_carver.hpp).
 async function loadThreadedEngine() {
   if (!window.crossOriginIsolated) {
     throw new Error(location.protocol === 'file:'
@@ -580,7 +582,10 @@ async function loadThreadedEngine() {
         'Open it from a web server, such as its copy on GitHub Pages'
       : 'threads need a cross-origin isolated page, and this browser didn\'t make it one');
   }
-  const requested = Number(new URLSearchParams(location.search).get('threads'));
+  const parameters = new URLSearchParams(location.search);
+  const spins = Number(parameters.get('spins') ?? -1);
+  ThreadedSeamCarver.spins = Number.isInteger(spins) && spins >= 0 ? spins : -1;
+  const requested = Number(parameters.get('threads'));
   const maxThreads = Number.isInteger(requested) && requested >= 1 && requested <= 64
     ? requested : Math.max(1, Math.min(navigator.hardwareConcurrency || 1, 8));
   await ThreadedSeamCarver.init(maxThreads);

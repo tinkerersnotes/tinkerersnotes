@@ -27,12 +27,14 @@ using seam_carving::TiledSeamCarver;
 
 // JavaScript passes the pixels as a Uint8Array of row-major RGB bytes. threads must not exceed
 // the pool's workers plus one, or starting a thread fails (PTHREAD_POOL_SIZE_STRICT in build.sh).
-TiledSeamCarver* create_tiled_seam_carver(const emscripten::val& rgb, int width, int height, int threads) {
+// spins: how often a thread checks a barrier before sleeping, negative for the default.
+TiledSeamCarver* create_tiled_seam_carver(const emscripten::val& rgb, int width, int height, int threads, int spins) {
     const std::vector<std::uint8_t> bytes = emscripten::convertJSArrayToNumberVector<std::uint8_t>(rgb);
     if (width <= 0 || height <= 0 || bytes.size() != static_cast<std::size_t>(width) * height * 3) {
         throw std::invalid_argument("rgb must hold width * height * 3 bytes");
     }
-    return new TiledSeamCarver(bytes.data(), width, height, threads);
+    return new TiledSeamCarver(bytes.data(), width, height, threads, 128,
+                               spins < 0 ? seam_carving::SleepingBarrier::kDefaultSpins : spins);
 }
 
 // Every seam is a full recompute: the flag the other engines take is accepted and ignored
