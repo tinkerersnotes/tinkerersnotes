@@ -31,12 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The runner's apt emscripten is much older, so install the version the page is developed with
-      - name: Install Emscripten 3.1.69
+      # The version the page is developed and tested with (see build.sh). Its built-in Emdawnwebgpu
+      # port downloads the Dawn release it pins while building the WebGPU engine in C++.
+      - name: Install Emscripten 6.0.3
         run: |
           git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
-          "$RUNNER_TEMP/emsdk/emsdk" install 3.1.69
-          "$RUNNER_TEMP/emsdk/emsdk" activate 3.1.69
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.3
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.3
 
       - name: Build the page
         run: |

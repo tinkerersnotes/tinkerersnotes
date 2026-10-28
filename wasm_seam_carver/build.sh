@@ -1,20 +1,24 @@
 #!/bin/sh
 # Builds seam_carver.html: a standalone page running the C++ core from ../seam_carver_core,
-# compiled to WebAssembly with Emscripten (sudo apt install emscripten), its JavaScript port,
-# a multithreaded C++ engine and two WebGPU engines, in JavaScript and in C++. The page opens
-# straight from disk, no web server needed; only the multithreaded engine needs one (see
-# isolation_service_worker.js). Downloads Dawn's Emdawnwebgpu package once, into build/.
+# compiled to WebAssembly with Emscripten, its JavaScript port, a multithreaded C++ engine and
+# two WebGPU engines, in JavaScript and in C++. The page opens straight from disk, no web server
+# needed; only the multithreaded engine needs one (see isolation_service_worker.js).
+#
+# Needs Emscripten 6.0.3, as the Pages workflow installs it (other versions may work):
+#   git clone https://github.com/emscripten-core/emsdk.git && cd emsdk
+#   ./emsdk install 6.0.3 && ./emsdk activate 6.0.3 && source ./emsdk_env.sh
 set -e
 cd "$(dirname "$0")"
 mkdir -p build
 
 # -fwasm-exceptions: the core's C++ exceptions as native WebAssembly exceptions, free until thrown
+# -sEXPORTED_RUNTIME_METHODS=getExceptionMessage: the page shows a C++ exception's type and message
 # -sSINGLE_FILE: the .wasm embedded into the .js, since browsers refuse to fetch files from file:// pages
 # -sALLOW_MEMORY_GROWTH: the mesh takes 64 bytes per pixel, 78 MB for 1280x958 already
 # -sENVIRONMENT=web,node: the same module runs in the page and in Node.js tests
 em++ -O3 -std=c++17 -Wall -Wextra -fwasm-exceptions -I../seam_carver_core \
     seam_carver_wasm.cpp ../seam_carver_core/seam_carver_impl.cpp \
-    -lembind -fwasm-exceptions -sEXPORT_EXCEPTION_HANDLING_HELPERS \
+    -lembind -fwasm-exceptions -sEXPORTED_RUNTIME_METHODS=getExceptionMessage \
     -sMODULARIZE -sEXPORT_NAME=createSeamCarverModule -sENVIRONMENT=web,node \
     -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=4GB -sSINGLE_FILE \
     -o build/seam_carver_wasm.js
@@ -25,34 +29,28 @@ em++ -O3 -std=c++17 -Wall -Wextra -fwasm-exceptions -I../seam_carver_core \
 #   than the most threads a carver may use, since the calling thread works too)
 # -sPTHREAD_POOL_SIZE_STRICT=2: a thread beyond the pool fails instead of deadlocking the page
 # -sENVIRONMENT=...,worker: the workers run this module's script too
+# -sINCOMING_MODULE_JS_API: the options the page passes in; mainScriptUrlOrBlob, the Blob URL its
+#   workers start from, is no longer accepted by default (Emscripten 6), and without it workers
+#   would start from the calling worker's own script and never load the module
 # -sMAXIMUM_MEMORY=2GB: shared memory reserves its maximum up front, keep it modest
 # -Wno-pthreads-mem-growth: growing shared memory slows JavaScript access to it, which only
 #   copies the picture in and out here
 em++ -O3 -std=c++20 -Wall -Wextra -pthread -fwasm-exceptions -I../parallel_seam_carver \
     tiled_seam_carver_wasm.cpp \
-    -lembind -fwasm-exceptions -sEXPORT_EXCEPTION_HANDLING_HELPERS \
+    -lembind -fwasm-exceptions -sEXPORTED_RUNTIME_METHODS=getExceptionMessage \
     -sMODULARIZE -sEXPORT_NAME=createTiledSeamCarverModule -sENVIRONMENT=web,worker,node \
     '-sPTHREAD_POOL_SIZE=Module.poolSize??Math.min(navigator.hardwareConcurrency,8)-1' -sPTHREAD_POOL_SIZE_STRICT=2 \
+    -sINCOMING_MODULE_JS_API=mainScriptUrlOrBlob,print,printErr \
     -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=2GB -Wno-pthreads-mem-growth -sSINGLE_FILE \
     -o build/tiled_seam_carver_wasm.js
 
 # The WebGPU engine in C++ (webgpu_seam_carver_cpp.cpp) uses webgpu.h from Emdawnwebgpu, Dawn's
-# implementation for Emscripten. This Emscripten predates the port built into newer releases
-# (--use-port=emdawnwebgpu), so a pinned release package serves as a local port. Its WGSL comes
-# from webgpu_seam_carver.js, the only copy, as a raw string literal.
-EMDAWNWEBGPU=v20261027.184652
-python3 - "$EMDAWNWEBGPU" <<'EOF'
-import hashlib, io, re, sys, urllib.request, zipfile
+# implementation for Emscripten, through the port built into Emscripten: --use-port=emdawnwebgpu
+# downloads the Dawn release this Emscripten pins, once, into its cache. Its WGSL comes from
+# webgpu_seam_carver.js, the only copy, as a raw string literal.
+python3 - <<'EOF'
+import re
 from pathlib import Path
-
-tag = sys.argv[1]
-sha256 = 'e0144a36f5a9e23c5d949bfa25d124e9b9e99c7864f7ede758a734719276e46c'
-target = Path(f'build/emdawnwebgpu-{tag}')
-if not (target / 'emdawnwebgpu_pkg' / 'emdawnwebgpu.port.py').is_file():
-    url = f'https://github.com/google/dawn/releases/download/{tag}/emdawnwebgpu_pkg-{tag}.zip'
-    data = urllib.request.urlopen(url).read()
-    assert hashlib.sha256(data).hexdigest() == sha256, f'{url} has an unexpected SHA-256'
-    zipfile.ZipFile(io.BytesIO(data)).extractall(target)
 
 js = Path('webgpu_seam_carver.js').read_text()
 wgsl = re.search(r'const WEBGPU_SEAM_CARVER_WGSL = /\* wgsl \*/ `(.*?)`;', js, re.S).group(1)
@@ -62,10 +60,9 @@ EOF
 
 # The same flags as the C++ core, plus the Emdawnwebgpu port at compiling and linking.
 # -sENVIRONMENT=web: WebGPU is a browser API
-em++ -O3 -std=c++20 -Wall -Wextra -fwasm-exceptions -Ibuild \
-    "--use-port=build/emdawnwebgpu-$EMDAWNWEBGPU/emdawnwebgpu_pkg/emdawnwebgpu.port.py" \
+em++ -O3 -std=c++20 -Wall -Wextra -fwasm-exceptions -Ibuild --use-port=emdawnwebgpu \
     webgpu_seam_carver_cpp.cpp \
-    -lembind -fwasm-exceptions -sEXPORT_EXCEPTION_HANDLING_HELPERS \
+    -lembind -fwasm-exceptions -sEXPORTED_RUNTIME_METHODS=getExceptionMessage \
     -sMODULARIZE -sEXPORT_NAME=createWebGPUCppModule -sENVIRONMENT=web \
     -sALLOW_MEMORY_GROWTH -sSINGLE_FILE \
     -o build/webgpu_seam_carver_cpp.js
