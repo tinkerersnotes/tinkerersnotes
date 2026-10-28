@@ -113,7 +113,8 @@
   <p class="lede">The same C++ <code>SeamCarver</code> class as the Python modules in this repo,
     compiled to WebAssembly with Emscripten, or its line-by-line JavaScript port, which removes
     exactly the same seams. Two more engines compute the costs in parallel: a
-    C++ version on several threads, and one on the GPU with WebGPU. With incremental cost updates,
+    C++ version on several threads, and one on the GPU with WebGPU, driven from JavaScript or from
+    C++ through webgpu.h. With incremental cost updates,
     every engine recomputes after a seam only the costs that seam changed. Pick a picture, then choose
     how much narrower and lower it should get: the lowest-energy seams disappear while the content
     keeps its proportions. The height shrinks by turning the picture a quarter turn, removing
@@ -131,7 +132,8 @@
       <label><input type="radio" name="engine" value="js"> JavaScript port</label>
       <label><input type="radio" name="engine" value="tiled" disabled> C++ on
         <select id="tiled-threads" disabled aria-label="Threads"><option>several</option></select> threads</label>
-      <label><input type="radio" name="engine" value="webgpu" disabled> WebGPU</label>
+      <label><input type="radio" name="engine" value="webgpu" disabled> WebGPU from JavaScript</label>
+      <label><input type="radio" name="engine" value="webgpucpp" disabled> WebGPU from C++</label>
     </fieldset>
     <p id="engine-note" class="note"></p>
     <p id="engines-missing" class="note"></p>
@@ -173,6 +175,7 @@
 <script type="text/plain" id="tiled-seam-carver-worker-js">@@TILED_SEAM_CARVER_WORKER_JS@@</script>
 <script>@@SEAM_CARVER_JS@@</script>
 <script>@@WEBGPU_SEAM_CARVER_JS@@</script>
+<script>@@WEBGPU_SEAM_CARVER_CPP_JS@@</script>
 <script>
 'use strict';
 
@@ -334,6 +337,40 @@ class ThreadedSeamCarver {
   delete() { ThreadedSeamCarver.request({ op: 'delete', carver: this.id }).catch(() => {}); }
 }
 
+// The WebGPU engine in C++ (webgpu_seam_carver_cpp.cpp), with the seam carver interface: its
+// asynchronous calls take resolve and reject functions, which become promises here
+class CppWebGPUSeamCarver {
+  static module = null;
+  static tile = 256;  // tile width of incremental updates for carvers created from now on
+
+  static async init() {
+    if (typeof navigator === 'undefined' || !navigator.gpu) {
+      throw new Error('this browser has no WebGPU');
+    }
+    CppWebGPUSeamCarver.module ??= await createWebGPUCppModule();
+    await new Promise((resolve, reject) => CppWebGPUSeamCarver.module.init(resolve, (message) => reject(new Error(message))));
+  }
+
+  // rgb is a row-major Uint8Array of width * height * 3 bytes
+  constructor(rgb, width, height) {
+    this.carver = new CppWebGPUSeamCarver.module.SeamCarver(rgb, width, height, CppWebGPUSeamCarver.tile);
+  }
+
+  get width() { return this.carver.width; }
+  get height() { return this.carver.height; }
+
+  shrink_horizontally(pixelsToShrink, incrementalCostUpdates = false) {
+    return new Promise((resolve, reject) =>
+      this.carver.shrink(pixelsToShrink, incrementalCostUpdates, resolve, (message) => reject(new RangeError(message))));
+  }
+
+  shrunk_rgb() {
+    return new Promise((resolve, reject) => this.carver.shrunk_rgb(resolve, (message) => reject(new Error(message))));
+  }
+
+  delete() { this.carver.delete(); }
+}
+
 // The engines, filled in as they load. core is the class with the seam carver interface, module
 // the Emscripten module it comes from (for exception messages), note what the page says about it.
 const engines = {
@@ -347,13 +384,21 @@ const engines = {
           'recompute. It removes the same seams as the C++ core.',
   },
   webgpu: {
-    name: 'WebGPU', core: null, module: null,
+    name: 'WebGPU from JavaScript', core: null, module: null,
     note: 'The costs are computed on the GPU, in compute passes tiled by triangles. With ' +
           'incremental updates, tiles a seam left unchanged return at once (tiles 256 wide; ?tile=N ' +
           'tries narrower ones, which need more passes). WGSL ' +
           'has no 64-bit floats, so costs are 32-bit: where two paths cost almost the same, it may ' +
           'pick the other one. On the sample picture the first seam already takes another, equally ' +
           'cheap path in 124 of its 958 rows, and from there the results drift apart.',
+  },
+  webgpucpp: {
+    name: 'WebGPU from C++', core: null, module: null,
+    note: 'The same WGSL and passes as WebGPU from JavaScript, driven by C++ compiled to ' +
+          'WebAssembly: webgpu.h, the C API that mirrors JavaScript\'s WebGPU, implemented for the ' +
+          'browser by Dawn\'s Emdawnwebgpu. It removes exactly the same seams as WebGPU from ' +
+          'JavaScript; the GPU does the same work, so expect the same speed. The C++ calls become ' +
+          'JavaScript WebGPU calls, and GPU completions come back as callbacks.',
   },
 };
 let engine = 'wasm';        // key of engines, from the radio buttons
@@ -621,6 +666,7 @@ $('incremental').addEventListener('change', () => {
   if (Number.isInteger(tile) && tile >= 2 && tile % 2 === 0) {
     ThreadedSeamCarver.tile = tile;
     WebGPUSeamCarver.tile = tile;
+    CppWebGPUSeamCarver.tile = tile;
   }
 }
 
@@ -642,6 +688,10 @@ const loaders = {
   webgpu: async () => {
     await WebGPUSeamCarver.init();
     engines.webgpu.core = WebGPUSeamCarver;
+  },
+  webgpucpp: async () => {
+    await CppWebGPUSeamCarver.init();
+    Object.assign(engines.webgpucpp, { core: CppWebGPUSeamCarver, module: CppWebGPUSeamCarver.module });
   },
 };
 

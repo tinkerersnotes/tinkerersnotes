@@ -1,8 +1,9 @@
 #!/bin/sh
 # Builds seam_carver.html: a standalone page running the C++ core from ../seam_carver_core,
 # compiled to WebAssembly with Emscripten (sudo apt install emscripten), its JavaScript port,
-# a multithreaded C++ engine and a WebGPU engine. The page opens straight from disk, no web server
-# needed; only the multithreaded engine needs one (see isolation_service_worker.js).
+# a multithreaded C++ engine and two WebGPU engines, in JavaScript and in C++. The page opens
+# straight from disk, no web server needed; only the multithreaded engine needs one (see
+# isolation_service_worker.js). Downloads Dawn's Emdawnwebgpu package once, into build/.
 set -e
 cd "$(dirname "$0")"
 mkdir -p build
@@ -35,6 +36,40 @@ em++ -O3 -std=c++20 -Wall -Wextra -pthread -fwasm-exceptions -I../parallel_seam_
     -sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=2GB -Wno-pthreads-mem-growth -sSINGLE_FILE \
     -o build/tiled_seam_carver_wasm.js
 
+# The WebGPU engine in C++ (webgpu_seam_carver_cpp.cpp) uses webgpu.h from Emdawnwebgpu, Dawn's
+# implementation for Emscripten. This Emscripten predates the port built into newer releases
+# (--use-port=emdawnwebgpu), so a pinned release package serves as a local port. Its WGSL comes
+# from webgpu_seam_carver.js, the only copy, as a raw string literal.
+EMDAWNWEBGPU=v20261027.184652
+python3 - "$EMDAWNWEBGPU" <<'EOF'
+import hashlib, io, re, sys, urllib.request, zipfile
+from pathlib import Path
+
+tag = sys.argv[1]
+sha256 = 'e0144a36f5a9e23c5d949bfa25d124e9b9e99c7864f7ede758a734719276e46c'
+target = Path(f'build/emdawnwebgpu-{tag}')
+if not (target / 'emdawnwebgpu_pkg' / 'emdawnwebgpu.port.py').is_file():
+    url = f'https://github.com/google/dawn/releases/download/{tag}/emdawnwebgpu_pkg-{tag}.zip'
+    data = urllib.request.urlopen(url).read()
+    assert hashlib.sha256(data).hexdigest() == sha256, f'{url} has an unexpected SHA-256'
+    zipfile.ZipFile(io.BytesIO(data)).extractall(target)
+
+js = Path('webgpu_seam_carver.js').read_text()
+wgsl = re.search(r'const WEBGPU_SEAM_CARVER_WGSL = /\* wgsl \*/ `(.*?)`;', js, re.S).group(1)
+assert '${' not in wgsl and '\\' not in wgsl and ')wgsl"' not in wgsl, 'WGSL must stay a plain template literal'
+Path('build/seam_carver_wgsl.inc').write_text(f'R"wgsl({wgsl})wgsl"\n')
+EOF
+
+# The same flags as the C++ core, plus the Emdawnwebgpu port at compiling and linking.
+# -sENVIRONMENT=web: WebGPU is a browser API
+em++ -O3 -std=c++20 -Wall -Wextra -fwasm-exceptions -Ibuild \
+    "--use-port=build/emdawnwebgpu-$EMDAWNWEBGPU/emdawnwebgpu_pkg/emdawnwebgpu.port.py" \
+    webgpu_seam_carver_cpp.cpp \
+    -lembind -fwasm-exceptions -sEXPORT_EXCEPTION_HANDLING_HELPERS \
+    -sMODULARIZE -sEXPORT_NAME=createWebGPUCppModule -sENVIRONMENT=web \
+    -sALLOW_MEMORY_GROWTH -sSINGLE_FILE \
+    -o build/webgpu_seam_carver_cpp.js
+
 # Inline the modules, the JavaScript engines and the sample picture into the page template
 python3 - <<'EOF'
 import base64
@@ -51,6 +86,7 @@ for placeholder, value in (('@@SEAM_CARVER_WASM_JS@@', script('build/seam_carver
                            ('@@TILED_SEAM_CARVER_WORKER_JS@@', script('tiled_seam_carver_worker.js')),
                            ('@@SEAM_CARVER_JS@@', script('seam_carver.js')),  # JavaScript port of the core
                            ('@@WEBGPU_SEAM_CARVER_JS@@', script('webgpu_seam_carver.js')),
+                           ('@@WEBGPU_SEAM_CARVER_CPP_JS@@', script('build/webgpu_seam_carver_cpp.js')),
                            ('@@SAMPLE_IMAGE_DATA_URL@@', 'data:image/jpeg;base64,' + sample)):
     assert page.count(placeholder) == 1, placeholder
     page = page.replace(placeholder, value)
