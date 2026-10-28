@@ -311,6 +311,17 @@ int main(int argc, char** argv) {
             carver.shrink_horizontally(seams);
             ms = ms_since(t);
             out = carver.shrunk_rgb();
+        } else if (mode == "class-incremental") {   // incremental dirty tiles of width base
+            const char* spins = std::getenv("SPINS");  // barrier checks before sleeping
+            seam_carving::TiledSeamCarver carver(im.rgb.data(), im.width, im.height, threads, 128,
+                                                 spins ? std::atoi(spins) : -1, base);
+            const auto t = std::chrono::steady_clock::now();
+            carver.shrink_horizontally(seams, true);
+            ms = ms_since(t);
+            out = carver.shrunk_rgb();
+            double full = 0;
+            for (int s = 0; s < seams; ++s) full += double(im.width - s) * (im.height - 1);
+            std::printf("  (computed %.1f%% of the cells of full recomputes)\n", 100 * carver.cells_computed() / full);
         } else {
             std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
             return 2;
@@ -320,7 +331,7 @@ int main(int argc, char** argv) {
                 .write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
         }
         if (reference.empty()) reference = out;
-        const bool tiling = mode == "tiled" || mode == "class";
+        const bool tiling = mode == "tiled" || mode == "class" || mode == "class-incremental";
         std::printf("%-17s threads=%-2d base=%-4d %8.0f ms   identical to %s: %s\n", mode.c_str(),
                     tiling ? threads : 1, tiling ? base : 0, ms, argv[7],
                     out == reference ? "yes" : "NO");

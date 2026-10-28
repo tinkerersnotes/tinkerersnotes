@@ -47,14 +47,14 @@ self.onmessage = async ({ data }) => {
         break;
       case 'create':
         try {
-          carvers.set(data.carver, new module.SeamCarver(data.rgb, data.width, data.height, data.threads, data.spins));
+          carvers.set(data.carver, new module.SeamCarver(data.rgb, data.width, data.height, data.threads, data.spins, data.tile));
         } catch (error) {
           carvers.set(data.carver, new Error(describe(error)));  // reported by the carver's next request
           throw error;
         }
         break;
       case 'shrink':
-        carver(data.carver).shrink_horizontally(data.pixels, false);
+        carver(data.carver).shrink_horizontally(data.pixels, data.incremental);
         break;
       case 'rgb':
         result = carver(data.carver).shrunk_rgb();

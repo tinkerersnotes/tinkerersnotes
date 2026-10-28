@@ -112,8 +112,9 @@
   <h1>Seam carving in WebAssembly</h1>
   <p class="lede">The same C++ <code>SeamCarver</code> class as the Python modules in this repo,
     compiled to WebAssembly with Emscripten, or its line-by-line JavaScript port, which removes
-    exactly the same seams. Two more engines recompute every seam from scratch in parallel: a
-    C++ version on several threads, and one on the GPU with WebGPU. Pick a picture, then choose
+    exactly the same seams. Two more engines compute the costs in parallel: a
+    C++ version on several threads, and one on the GPU with WebGPU. With incremental cost updates,
+    every engine recomputes after a seam only the costs that seam changed. Pick a picture, then choose
     how much narrower and lower it should get: the lowest-energy seams disappear while the content
     keeps its proportions. The height shrinks by turning the picture a quarter turn, removing
     vertical seams and turning it back.</p>
@@ -134,6 +135,10 @@
     </fieldset>
     <p id="engine-note" class="note"></p>
     <p id="engines-missing" class="note"></p>
+    <div class="row">
+      <label><input type="checkbox" id="incremental" checked> Incremental cost updates: after the
+        first seam, recompute only the costs the last seam changed</label>
+    </div>
     <div class="row">
       <label for="width-seams">Shrink width by</label>
       <input type="range" id="width-seams" min="0" max="0" value="0" disabled>
@@ -267,6 +272,7 @@ class ThreadedSeamCarver {
   static maxThreads = 1;
   static threads = 1;           // used by carvers created from now on
   static spins = -1;            // barrier checks before sleeping, ?spins=N in the address; -1: default
+  static tile = -1;             // incremental tile width, ?tile=N in the address; -1: default
 
   static request(message, transfer = []) {
     const id = ++ThreadedSeamCarver.nextId;
@@ -307,18 +313,19 @@ class ThreadedSeamCarver {
     this._height = height;
     this.id = ++ThreadedSeamCarver.carvers;
     // A failure surfaces at the carver's next request, which the worker answers with the same error
-    ThreadedSeamCarver.request({ op: 'create', carver: this.id, rgb, width, height, threads: ThreadedSeamCarver.threads, spins: ThreadedSeamCarver.spins },
-                               [rgb.buffer]).catch(() => {});
+    const { threads, spins, tile } = ThreadedSeamCarver;
+    ThreadedSeamCarver.request({ op: 'create', carver: this.id, rgb, width, height, threads, spins, tile }, [rgb.buffer])
+      .catch(() => {});
   }
 
   get width() { return this._width; }
   get height() { return this._height; }
 
-  async shrink_horizontally(pixelsToShrink) {
+  async shrink_horizontally(pixelsToShrink, incrementalCostUpdates = false) {
     if (!Number.isInteger(pixelsToShrink) || pixelsToShrink < 0 || pixelsToShrink >= this._width) {
       throw new RangeError('pixels_to_shrink must be in [0, width)');
     }
-    await ThreadedSeamCarver.request({ op: 'shrink', carver: this.id, pixels: pixelsToShrink });
+    await ThreadedSeamCarver.request({ op: 'shrink', carver: this.id, pixels: pixelsToShrink, incremental: incrementalCostUpdates });
     this._width -= pixelsToShrink;
   }
 
@@ -334,13 +341,16 @@ const engines = {
   js: { name: 'the JavaScript port', core: SeamCarver, module: null, note: '' },
   tiled: {
     name: 'C++ on several threads', core: null, module: null,
-    note: 'Every seam is a full recompute of the path costs, split over the threads by triangle ' +
-          'tiling. It removes the same seams as the other C++ engine, which only updates the costs ' +
-          'near the last seam, so it does several times less work and usually wins on one thread.',
+    note: 'The costs live in flat arrays and are split over the threads by triangle tiling. With ' +
+          'incremental updates, only the tiles a seam changed are recomputed, in tiles 32 columns ' +
+          'wide (?tile=N in the address tries other widths); without, every seam is a full ' +
+          'recompute. It removes the same seams as the C++ core.',
   },
   webgpu: {
     name: 'WebGPU', core: null, module: null,
-    note: 'Every seam is a full recompute on the GPU, in compute passes tiled by triangles. WGSL ' +
+    note: 'The costs are computed on the GPU, in compute passes tiled by triangles. With ' +
+          'incremental updates, tiles a seam left unchanged return at once (tiles 256 wide; ?tile=N ' +
+          'tries narrower ones, which need more passes). WGSL ' +
           'has no 64-bit floats, so costs are 32-bit: where two paths cost almost the same, it may ' +
           'pick the other one. On the sample picture the first seam already takes another, equally ' +
           'cheap path in 124 of its 958 rows, and from there the results drift apart.',
@@ -360,6 +370,7 @@ let rotatedWidthResult = null;
 let heightCarver = null;
 let heightRemoved = 0;
 let rebuild = false;        // the picture or the engine changed: start again from the original
+let incremental = true;     // incremental cost updates, from the checkbox
 let running = false;
 let pending = false;       // a change arrived while shrink() ran: run it again
 let elapsedMs = 0;
@@ -488,7 +499,7 @@ async function shrink() {
         }
         const step = Math.min(widthTarget - widthRemoved, SEAMS_PER_STEP);
         if (step > 0) {
-          await widthCarver.shrink_horizontally(step);
+          await widthCarver.shrink_horizontally(step, incremental);
           widthRemoved += step;
         }
         discardHeightCarver();  // its input, the width carver's result, just changed
@@ -505,7 +516,7 @@ async function shrink() {
           heightRemoved = 0;
         }
         const step = Math.min(heightTarget - heightRemoved, SEAMS_PER_STEP);
-        await heightCarver.shrink_horizontally(step);
+        await heightCarver.shrink_horizontally(step, incremental);
         heightRemoved += step;
         setStatus(`Shrinking the height… ${heightRemoved} of ${heightTarget} px`);
       } else {
@@ -595,6 +606,22 @@ async function loadThreadedEngine() {
   menu.disabled = false;
   engines.tiled.name = `C++ on ${maxThreads} threads`;
   engines.tiled.core = ThreadedSeamCarver;
+}
+
+// Incremental updates on or off: start again from the original picture, for a fair timing
+$('incremental').addEventListener('change', () => {
+  incremental = $('incremental').checked;
+  rebuild = true;
+  shrink();
+});
+
+// ?tile=N: the tile width of incremental updates, for the multithreaded and WebGPU engines
+{
+  const tile = Number(new URLSearchParams(location.search).get('tile'));
+  if (Number.isInteger(tile) && tile >= 2 && tile % 2 === 0) {
+    ThreadedSeamCarver.tile = tile;
+    WebGPUSeamCarver.tile = tile;
+  }
 }
 
 // Another thread count starts the multithreaded engine again from the original picture
