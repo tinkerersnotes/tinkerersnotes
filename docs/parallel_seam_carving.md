@@ -28,33 +28,51 @@ row are independent.
 *The first seam, in red. It runs down the blank paper along the left edge, where neighbouring
 pixels differ least.*
 
-## 2. Splitting a full recompute into triangles
+## 2. Splitting a full recompute into diamonds
 
-Synchronizing all threads after every row would cost a barrier per row, 957 per seam. Triangle
-tiling needs far fewer. Rows are grouped into **strips** of `base / 2` rows, and each strip is
-computed in two **waves**:
+Synchronizing all threads after every row would cost a barrier per row, 957 per seam. Tiling needs
+far fewer. Rows are grouped into **strips** of `h = base / 2` rows. The first version split each
+strip into two **waves** of triangles, with a barrier after each:
 
-- **Wave A, downward triangles.** Each thread takes a segment of `base` columns from the row above
-  the strip and fills a triangle below it, one column narrower on each side per row. Every cell's
-  three parents lie inside its own triangle or in the finished row above.
-- **Wave B, upward triangles.** The gaps between the downward triangles are upward triangles. Their
-  sides read the downward triangles, which are finished by now.
+- **Downward triangles.** Each thread takes a segment of `base` columns from the row above the
+  strip and fills a triangle below it, one column narrower on each side per row.
+- **Upward triangles.** The gaps between the downward triangles, filled once those are finished,
+  since their sides read them.
 
-A barrier ends each wave, so a strip costs two barriers instead of `base / 2`.
+But an upward triangle ends on a full row `base` columns wide, and that row is all that the
+downward triangle beneath it, in the next strip, needs. So the thread that finishes an upward
+triangle can go straight on into the one below, without waiting for the others. Together they form
+a **diamond** centred on a column `c`:
 
-![Triangle tiling, schematic](images/tiling.svg)
+- **Upper half**, the upward triangle of strip `t − 1`: columns `[c − k, c + k)` of its row `k`. It
+  reads the row above the strip under its tip and, at its sides, the lower halves of the previous
+  wave.
+- **Lower half**, the downward triangle of strip `t`: columns `[c − h + k, c + h − k)`. It reads
+  only its own upper half's last row.
 
-*Two strips of a picture 24 columns wide, `base` 8. Each colour is a wave, `T0`/`T1` the thread
-that computes the tile, and the red cell shows the three parents every cell reads.*
+Each wave is one row of diamonds, offset by half a diamond from the previous wave, so that its upper
+halves fill the gaps between the previous wave's lower halves. That is one barrier per strip instead
+of two. The first wave has only lower halves, and also zeroes the top row's costs under them; the
+last has only upper halves.
 
-On the sample picture with `base` 128, a strip is 64 rows high and 10 segments wide. 15 strips make
-**30 waves**, and with them 34 barriers per seam: 2 per strip, plus 4 around the top row, the trace,
-the shift and the width update. The four threads take tiles round-robin:
+![Triangles and diamonds, schematic](images/tiling.svg)
 
-![Full recompute tiles on the sample picture](images/tiles_full_recompute.jpg)
+*The same two strips of a picture 24 columns wide, `base` 8: four waves of triangles, three of
+diamonds. Each colour is a wave, `T0`/`T1` the thread that computes the tile, and thick lines are
+tile borders. In red, a lower half's first row: its three parents all lie in its own upper half's
+last row.*
 
-*Full recompute on 4 threads. Each label is `wave·thread`: wave 1 is the downward triangles of the
-first strip, wave 2 the upward ones between them, and so on down. Colours repeat every six waves.*
+On the sample picture with `base` 128, a strip is 64 rows high. 15 strips make **16 waves** of
+diamonds instead of 30 of triangles, and 19 barriers per seam instead of 34: one per wave, plus
+three for the trace, the shift and the width update. The four threads take diamonds round-robin.
+The figure uses `base` 128 so that the labels fit; the threads use 64 by default, which measured
+fastest (section 3).
+
+![Full recompute diamonds on the sample picture](images/tiles_full_recompute.jpg)
+
+*Full recompute on 4 threads, `base` 128. Each label is `wave·thread`: wave 0 is the lower halves
+alone along the top, wave 1 the first whole diamonds between them, and so on down to wave 15, upper
+halves alone along the bottom. Colours repeat every six waves.*
 
 ## 3. Incremental updates: only the cone
 
@@ -69,41 +87,59 @@ only change in two cases:
 On the sample picture the cone averages 125 columns: about 21 near the top and 225 near the bottom.
 That is 13% of the cells a full recompute evaluates.
 
-The parallel engines cover the cone with a finer tiling, `base` 32: strips 16 rows high, 120 waves
-per seam. A tile is **dirty** if it holds a seed or reads a cell whose cost changed in this seam.
-Only dirty tiles are recomputed, and each recomputed cell whose cost changes is marked with the
-seam's number (its epoch), so the next tiles' dirty tests can see it. A clean tile's inputs are
-unchanged, so its stored costs are still exactly what a full recompute would produce. That keeps
-the results bit-identical to the single-threaded core.
+The parallel engines cover the cone with finer diamonds, `base` 32: strips 16 rows high, 61 waves
+per seam. A half is **dirty** if it holds a seed or reads a cell whose cost changed in this seam.
+Only dirty halves are recomputed, and each recomputed cell whose cost changes is marked with the
+seam's number (its epoch), so that later dirty tests can see it. A diamond's halves are tested
+separately: the upper one by the cells it reads outside itself, the lower one by its upper half's
+last row, by the same thread right after. A clean half's inputs are unchanged, so its stored costs
+are still exactly what a full recompute would produce. That keeps the results bit-identical to the
+single-threaded core.
 
 ![Dirty tiles after seam 1](images/cone_after_seam_1.jpg)
 
-*After removing seam 1 (red): the cone's edges (white) and the 582 dirty tiles, coloured by the
+*After removing seam 1 (red): the cone's edges (white) and the 643 dirty halves, coloured by the
 thread that recomputed them, as logged from the engine. The cone can only spread right here, since
 the seam runs along the left border.*
 
 ![Dirty tiles after seam 300](images/cone_after_seam_300.jpg)
 
-*After removing seam 300, in the middle of the narrowed picture: 485 dirty tiles. The cone is
+*After removing seam 300, in the middle of the narrowed picture: 480 dirty halves. The cone is
 narrow at the top and widens as cost changes spread down.*
 
 ![The top of that cone, enlarged](images/cone_after_seam_300_top.jpg)
 
-*The top of the same cone, twice as large. Tiles start 32 columns wide; the white cone edges stay
-inside them.*
+*The top of the same cone, twice as large. Diamonds are 32 columns wide; where both halves of one
+were dirty, the same thread recomputed both. The white cone edges stay inside the dirty halves.*
 
-The split across threads is uneven: after seam 1, threads 0 to 3 recomputed 203, 147, 124 and
-108 tiles. Each strip deals out its candidate tiles round-robin, starting with thread 0, and near
-the top a strip has only one or two. Even so, tiles 32 wide recompute only 16% of a full recompute,
-1.21 times the core's own incremental update.
+The split across threads is uneven: after seam 1, threads 0 to 3 recomputed 222, 175, 134 and
+112 halves. Each wave deals out its candidate diamonds round-robin, starting with thread 0, and near
+the top a wave has only one or two. Even so, diamonds 32 wide recompute only 16% of a full
+recompute, 1.21 times the core's own incremental update.
 
-| 600 seams of the sample picture | time |
-|---|---|
-| Single-threaded core, incremental (4-core Linux VM, native) | 1646 ms |
-| Threads, full recompute, 4 threads | 2200 ms |
-| **Threads, incremental dirty tiles, 4 threads** | **635 ms** |
-| Core in WebAssembly, incremental (Chromium, 2 cores) | 3.39 s |
-| **Threads in WebAssembly, incremental, 2 threads (Chromium, 2 cores)** | **2.14 s** |
+### What the diamonds gained
+
+| 600 seams of the sample picture | triangles | diamonds |
+|---|---|---|
+| Full recompute, 4 threads (4-core Linux VM, native) | 2460 ms | **2090 ms** |
+| Incremental, 4 threads (native) | 650 ms | **610 ms** |
+| Incremental in WebAssembly, 2 threads (Chromium, 2 cores) | 2.03 s | 2.03 s |
+| Incremental in WebAssembly, 4 threads on 2 cores | 3.81 s | **2.89 s** |
+| Incremental in WebAssembly, 8 threads on 2 cores | 5.68 s | **3.76 s** |
+
+For comparison, the single-threaded core's incremental update takes 1646 ms natively and 3.39 s
+in Chromium.
+
+Natively, halving the barriers gained less than it seems. A barrier costs about a microsecond, so
+the incremental update's 64 barriers per seam instead of 124 saved about 40 ms. Most of the time a
+thread spends at barriers, about 190 ms of the 610, it waits for the slowest diamond of its wave,
+and near the cone's tip a wave has only one or two. Diamonds don't shorten that chain, since each
+does the work of two triangles. Full recomputes gained more, partly because the best tile width
+moved: triangles were fastest 128 wide, diamonds 64 wide.
+
+Diamonds pay off where waking a thread is expensive. With more threads than cores, waiting
+threads sleep, and every barrier has to wake them again: there, halving the barriers made
+incremental updates a quarter to a third faster.
 
 ## 4. How the threads synchronize
 
@@ -173,36 +209,47 @@ That maps onto the tiling directly:
 
 | Seam carving | WebGPU |
 |---|---|
-| a wave (all triangles of one kind in a strip) | one `dispatchWorkgroups()` |
-| a triangle tile | one workgroup |
-| a column of the tile | one invocation |
-| the rows inside a tile | a loop, with `storageBarrier()` between rows |
+| a wave (a row of diamonds) | one `dispatchWorkgroups()` |
+| a diamond | one workgroup |
+| a column of the diamond | one invocation |
+| the rows inside a diamond | a loop, with `storageBarrier()` between rows |
 | the barrier between waves | the boundary between two dispatches |
 
 ![One unit of work on the GPU](images/gpu_unit.svg)
 
-*One wave on the GPU. Each workgroup fills one triangle. Each of its 256 invocations owns a column,
+*One wave on the GPU. Each workgroup fills one diamond. Each of its 256 invocations owns a column,
 computes one cell per row and waits at `storageBarrier()` before the next row.*
 
-The shader for wave A, from `webgpu_seam_carver.js`:
+The full recompute's shader, from `webgpu_seam_carver.js`. `centre()`, `upper_r0()` and the other
+helpers derive the diamond's place and its halves' rows from the wave number:
 
 ```wgsl
 @compute @workgroup_size(BASE)
-fn downward_triangles(@builtin(workgroup_id) group: vec3u,
-                      @builtin(local_invocation_index) local: u32) {
+fn diamonds(@builtin(workgroup_id) group: vec3u,
+            @builtin(local_invocation_index) local: u32) {
   let w = uniform_width(local);
-  let segments = (w + BASE - 1u) / BASE;
-  let i = group.x;
-  if (i >= segments) {
+  let c = centre(group.x);
+  if (c >= w + HALF) {
     return;
   }
-  let a = i * BASE;
-  let x = a + local;
-  for (var k = 1u; k <= params.rows; k++) {
-    let lo = select(a + k, 0u, i == 0u);
-    let hi = select(a + BASE - k, w, i == segments - 1u);
-    if (x >= lo && x < hi) {
-      relax(x, params.r0 + k, w);  // best of 3 parents: one cell's cost and parent
+  let x = i32(c) - i32(HALF) + i32(local);
+  if (params.wave == 0u) {
+    if (x >= 0 && x < i32(w)) {
+      cost[u32(x)] = 0.0;
+    }
+    storageBarrier();
+  }
+  let r0 = upper_r0();
+  for (var k = 1u; k <= upper_rows(); k++) {
+    if (in_upper(x, i32(c), k, w)) {
+      relax(u32(x), r0 + k, w);  // best of 3 parents: one cell's cost and parent
+    }
+    storageBarrier();
+  }
+  let r1 = lower_r0();
+  for (var k = 1u; k <= lower_rows(); k++) {
+    if (in_lower(x, i32(c), k, w)) {
+      relax(u32(x), r1 + k, w);
     }
     storageBarrier();
   }
@@ -224,10 +271,11 @@ How it differs from the threads:
   f32 square roots, and f32 additions are correctly rounded, so every run is exact for f32. Near-ties
   that f64 separates can still pick other seams: on the sample picture the first seam already
   differs in 124 of its 958 rows, at an equal cost.
-- **Incremental, with wide tiles.** Every tile of a wave is launched, and a clean one tests itself
-  and returns at once. A GPU computes all tiles of a wave together, and every seam still walks all
-  958 rows in sequence, so narrow tiles would only add dispatches. The default tile stays 256 wide,
-  the same passes as a full recompute; `?tile=N` tries others.
+- **Incremental, with wide tiles.** Every diamond of a wave is launched, and each of its halves
+  tests itself and skips its rows if clean. A GPU computes all diamonds of a wave together, and
+  every seam still walks all 958 rows in sequence, so narrow tiles would only add dispatches. The
+  default tile stays 256 wide, the same passes as a full recompute: 9 waves per seam, where
+  triangles took 16. `?tile=N` tries others.
 
 ## 6. The build: C++ to WebAssembly to one HTML file
 
@@ -247,8 +295,9 @@ worker.*
   extracts it into a C++ raw string literal (`build/seam_carver_wgsl.inc`) for the C++ engine.
 - **Embedding.** The inline step fills the `@@placeholders@@` of `seam_carver.template.html` with
   the three modules, the JavaScript engines, the worker script and the sample picture. It first
-  escapes every closing script tag inside them, which would end the inline script early. The threaded module goes in twice, as code and as text (a
-  `<script type="text/plain">`), because its workers must start from a Blob of that text.
+  escapes every closing script tag inside them, which would end the inline script early. The
+  threaded module goes in twice, as code and as text (a `<script type="text/plain">`), because its
+  workers must start from a Blob of that text.
 - **One file.** The result opens straight from disk. Only the threads need a web server, for the
   reason below.
 

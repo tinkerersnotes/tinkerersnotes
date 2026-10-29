@@ -35,8 +35,8 @@ TiledSeamCarver* create_tiled_seam_carver(const emscripten::val& rgb, int width,
     if (width <= 0 || height <= 0 || bytes.size() != static_cast<std::size_t>(width) * height * 3) {
         throw std::invalid_argument("rgb must hold width * height * 3 bytes");
     }
-    return tile < 0 ? new TiledSeamCarver(bytes.data(), width, height, threads, 128, spins)
-                    : new TiledSeamCarver(bytes.data(), width, height, threads, 128, spins, tile);
+    return new TiledSeamCarver(bytes.data(), width, height, threads, TiledSeamCarver::default_base, spins,
+                               tile < 0 ? TiledSeamCarver::default_incremental_base : tile);
 }
 
 void shrink_horizontally(TiledSeamCarver& carver, int pixels_to_shrink, bool incremental_cost_updates) {

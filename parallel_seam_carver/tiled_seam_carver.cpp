@@ -1,4 +1,4 @@
-// Prototype: seam carving with the path cost propagation parallelized by triangle tiling.
+// Prototype: seam carving with the path cost propagation parallelized by diamond tiling.
 //
 // Dense row-major arrays instead of the linked mesh: per pixel the cost of the cheapest path from
 // the top row and the parent's column offset (-1, 0, +1). Every seam is a full recompute, the
@@ -6,15 +6,15 @@
 // a later one wins only if strictly cheaper, so results must match the core's
 // shrink_horizontally(n, false) bit for bit.
 //
-// Tiling, per strip of h rows below a fully computed row r0:
-//   phase A  each task owns a base segment [a, b) of row r0 and fills the downward triangle
-//            [a + k, b - k) of row r0 + k; segments at the image border don't shrink on that side
-//   phase B  each boundary c between two segments fills the upward triangle [c - k, c + k),
-//            which reads the sides of both neighbouring triangles from phase A
-// Two barriers per strip. h = base / 2, so neighbouring upward triangles never overlap.
+// Tiling: strips of h = base / 2 rows, one wave of diamonds per strip boundary, centred p = 2h
+// apart and offset by h from the previous wave's. A diamond is the upward triangle [c - k, c + k)
+// of strip t - 1 above the downward triangle [c - h + k, c + h - k) of strip t, which only reads
+// the upward one's last row: one barrier per strip instead of two for separate triangles. The
+// same tiling as tiled_seam_carver.hpp, which explains it in full.
 //
-// CHECK=1 records which (seam, phase) wrote each cell and asserts every cell is written exactly
-// once, and that every parent is final before it is read.
+// CHECK=1 records which (seam, wave) wrote each cell and asserts every cell is written exactly
+// once, and that every parent is final before it is read: computed in an earlier wave, or by the
+// same diamond.
 #include <algorithm>
 #include <atomic>
 #include <barrier>
@@ -55,8 +55,12 @@ struct Carver {
     std::vector<double> cost;
     std::vector<std::int8_t> prev;
 #if CHECK
-    std::vector<std::uint32_t> stamp;    // seam number * 4 + 1 + writer phase, 0 = never written
-    std::uint32_t seam_no = 0;
+    // Per cell the seam number (high half) and the writer: wave * 65536 + diamond + 1, 0 = never
+    std::vector<std::uint64_t> stamp;
+    std::uint64_t seam_no = 0;
+    void stamp_top(int lo, int hi, int writer) {
+        for (int x = lo; x < hi; ++x) stamp[x] = seam_no << 32 | std::uint32_t(writer);
+    }
 #endif
     explicit Carver(Image& image)
         : im(image), cost(std::size_t(image.stride) * image.height), prev(cost.size()) {
@@ -65,16 +69,20 @@ struct Carver {
 #endif
     }
 
-    // One cell of the recurrence, the same arithmetic and tie-breaking as the core
-    inline void relax(int x, int y, [[maybe_unused]] int phase) {
+    // One cell of the recurrence, the same arithmetic and tie-breaking as the core. writer: the
+    // wave * 65536 + diamond + 1 computing it; a parent must come from an earlier wave of this
+    // seam, or from the same diamond, which computes its rows in order
+    inline void relax(int x, int y, [[maybe_unused]] int writer) {
         const std::size_t row = std::size_t(y) * im.stride, up = row - im.stride;
 #if CHECK
-        const std::uint32_t mine = seam_no * 4 + 1;
-        if (stamp[row + x] >= mine) { std::fprintf(stderr, "cell (%d,%d) written twice\n", x, y); std::abort(); }
+        const std::uint64_t mine = seam_no << 32 | std::uint32_t(writer);
+        if (stamp[row + x] >> 32 == seam_no) { std::fprintf(stderr, "cell (%d,%d) written twice\n", x, y); std::abort(); }
         for (int dx = -1; dx <= 1; ++dx) {
             const int px = x + dx;
             if (px < 0 || px >= im.width) continue;
-            if (y - 1 > 0 && stamp[up + px] < mine) {
+            const std::uint64_t parent = stamp[up + px];
+            const bool earlier_wave = parent >> 32 == seam_no && (parent & 0xffffffff) >> 16 < std::uint32_t(writer) >> 16;
+            if (!earlier_wave && parent != mine) {
                 std::fprintf(stderr, "cell (%d,%d) read parent (%d,%d) before it was computed\n", x, y, px, y - 1);
                 std::abort();
             }
@@ -94,15 +102,15 @@ struct Carver {
         cost[row + x] = best;
         prev[row + x] = from;
 #if CHECK
-        stamp[row + x] = mine + phase;
+        stamp[row + x] = mine;
 #endif
     }
 
     // Cells [lo, hi) of row y. Same arithmetic as relax(), with everything the compiler would
     // otherwise reload after each int8_t store (a char type may alias anything) held in locals.
-    void relax_range(int lo, int hi, int y, [[maybe_unused]] int phase) {
+    void relax_range(int lo, int hi, int y, [[maybe_unused]] int writer) {
 #if CHECK
-        for (int x = lo; x < hi; ++x) relax(x, y, phase);
+        for (int x = lo; x < hi; ++x) relax(x, y, writer);
 #else
         const int width = im.width;
         const std::size_t row = std::size_t(y) * im.stride;
@@ -157,8 +165,11 @@ struct Carver {
 
     void serial_propagate() {
         top_row();
+#if CHECK
+        stamp_top(0, im.width, 0);
+#endif
         for (int y = 1; y < im.height; ++y)
-            relax_range(0, im.width, y, 0);
+            relax_range(0, im.width, y, y << 16);
     }
 
     // Leftmost cheapest bottom pixel, then the parents back to the top; removes the seam
@@ -217,45 +228,55 @@ static std::vector<std::uint8_t> run_serial(Image im, int seams, double& ms) {
     return shrunk(im);
 }
 
-// --- triangle-tiled, persistent threads ---------------------------------------------------------
+// --- diamond-tiled, persistent threads ----------------------------------------------------------
 static std::vector<std::uint8_t> run_tiled(Image im, int seams, int threads, int base, double& ms) {
     Carver c(im);
     std::vector<int> seam(im.height);
     std::barrier sync(threads);
-    const int h = base / 2;  // strip height; base >= 2 is checked in main()
+    const int h = base / 2, p = 2 * h;  // base >= 2 is checked in main()
+    const int strips = (im.height - 2 + h) / h;
 
     auto worker = [&](int tid) {
         for (int s = 0; s < seams; ++s) {
             const int w = im.width;                          // stable: changes only between barriers
-            const int tasks = (w + base - 1) / base;
-            if (tid == 0) {
 #if CHECK
-                ++c.seam_no;
-#endif
-                c.top_row();
-            }
+            if (tid == 0) ++c.seam_no;
             sync.arrive_and_wait();
-            for (int r0 = 0; r0 < im.height - 1; r0 += h) {
-                const int rows = std::min(h, im.height - 1 - r0);
-                // Phase A: downward triangles over each base segment
-                for (int i = tid; i < tasks; i += threads) {
-                    const int a = i * base, b = std::min(w, a + base);
-                    for (int k = 1; k <= rows; ++k) {
-                        const int lo = i == 0 ? 0 : a + k, hi = i == tasks - 1 ? w : b - k;
-                        c.relax_range(lo, hi, r0 + k, 1);
+#endif
+            for (int t = 0; t <= strips; ++t) {
+                const int offset = (t + 1) % 2 * h;
+                const int centres = (w + h - 1 - offset) / p + 1;
+                for (int j = tid; j < centres; j += threads) {
+                    const int x = offset + j * p;
+                    const int writer = t * 65536 + j + 1;
+                    if (t == 0) {
+                        std::fill(c.cost.begin() + std::max(0, x - h), c.cost.begin() + std::min(w, x + h), 0.0);
+#if CHECK
+                        c.stamp_top(std::max(0, x - h), std::min(w, x + h), writer);
+#endif
+                    } else {                                 // upper half: strip t - 1
+                        const int r0 = (t - 1) * h, rows = std::min(h, im.height - 1 - r0);
+                        for (int k = 1; k <= rows; ++k)
+                            c.relax_range(std::max(0, x - k), std::min(w, x + k), r0 + k, writer);
                     }
-                }
-                sync.arrive_and_wait();
-                // Phase B: upward triangles at the boundaries between segments
-                for (int j = 1 + tid; j < tasks; j += threads) {
-                    const int edge = j * base;
-                    for (int k = 1; k <= rows; ++k) {
-                        const int lo = std::max(0, edge - k), hi = std::min(w, edge + k);
-                        c.relax_range(lo, hi, r0 + k, 2);
+                    if (t < strips) {                        // lower half: strip t
+                        const int r0 = t * h, rows = std::min(h, im.height - 1 - r0);
+                        for (int k = 1; k <= rows; ++k)
+                            c.relax_range(std::max(0, x - h + k), std::min(w, x + h - k), r0 + k, writer);
                     }
                 }
                 sync.arrive_and_wait();
             }
+#if CHECK
+            if (tid == 0) {                                  // and every cell was written
+                for (int y = 0; y < im.height; ++y)
+                    for (int x = 0; x < w; ++x)
+                        if (c.stamp[std::size_t(y) * im.stride + x] >> 32 != c.seam_no) {
+                            std::fprintf(stderr, "cell (%d,%d) never written\n", x, y);
+                            std::abort();
+                        }
+            }
+#endif
             if (tid == 0) c.trace_seam(seam);
             sync.arrive_and_wait();
             const int per = (im.height + threads - 1) / threads;   // rows are independent
@@ -281,8 +302,7 @@ int main(int argc, char** argv) {
     }
     const Image im = load(argv[1], std::atoi(argv[2]), std::atoi(argv[3]));
     const int seams = std::atoi(argv[4]), threads = std::atoi(argv[5]), base = std::atoi(argv[6]);
-    // Upward triangles at neighbouring boundaries grow 2k wide by row k <= base / 2: they only
-    // stay apart if every base segment is at least 2 pixels wide
+    // Diamonds have halves of base / 2 >= 1 rows; an odd base is rounded down
     if (base < 2 || threads < 1) {
         std::fprintf(stderr, "base must be >= 2 and threads >= 1\n");
         return 2;
@@ -313,7 +333,8 @@ int main(int argc, char** argv) {
             out = carver.shrunk_rgb();
         } else if (mode == "class-incremental") {   // incremental dirty tiles of width base
             const char* spins = std::getenv("SPINS");  // barrier checks before sleeping
-            seam_carving::TiledSeamCarver carver(im.rgb.data(), im.width, im.height, threads, 128,
+            seam_carving::TiledSeamCarver carver(im.rgb.data(), im.width, im.height, threads,
+                                                 seam_carving::TiledSeamCarver::default_base,
                                                  spins ? std::atoi(spins) : -1, base);
             const auto t = std::chrono::steady_clock::now();
             carver.shrink_horizontally(seams, true);

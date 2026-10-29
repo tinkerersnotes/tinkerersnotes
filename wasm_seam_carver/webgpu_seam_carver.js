@@ -13,12 +13,13 @@
 // engines, rounding and extra ties make the seams differ sooner or later.
 //
 // Rows depend on the row above, so the costs are computed in strips of HALF rows tiled by
-// triangles, as in ../parallel_seam_carver/tiled_seam_carver.cpp:
-//   phase A  one workgroup per base segment of BASE columns fills the downward triangle below it,
-//            narrowing by one column on each side per row (not at the picture's borders)
-//   phase B  one workgroup per boundary between segments fills the upward triangle in between,
-//            widening by one column on each side per row, from both neighbours' phase A results
-// Within a workgroup each invocation owns a column and a barrier separates the rows.
+// diamonds, as in ../parallel_seam_carver/tiled_seam_carver.hpp: one dispatch per wave, one
+// workgroup per diamond. A diamond is the upward triangle of strip wave - 1, widening by one
+// column on each side per row, above the downward triangle of strip wave, narrowing again; the
+// lower half reads only the upper half's last row, so the workgroup goes straight on. Each wave's
+// diamonds sit between the previous wave's, offset by HALF columns. Within a workgroup each
+// invocation owns a column and a barrier separates the rows. strips + 1 dispatches per seam,
+// where separate triangles took two per strip.
 //
 // Incremental updates work as in ../parallel_seam_carver/tiled_seam_carver.hpp: removing a seam
 // shifts the costs and parents with the pixels, so only cells next to the removed seam ("seeds")
@@ -28,22 +29,22 @@
 // changed get the epoch. The same arithmetic in the same order gives the same f32 results, so the
 // seams are exactly those of full recomputes.
 //
-// Unlike threads, a GPU gains little from narrow tiles: it computes all tiles of a phase at once,
+// Unlike threads, a GPU gains little from narrow tiles: it computes all tiles of a wave at once,
 // and every seam still takes all rows in sequence, one barrier per row, however the rows are
-// tiled. Narrow tiles only add dispatches (tiles 32 wide: 120 per seam instead of 20). So the
+// tiled. Narrow tiles only add dispatches (tiles 32 wide: 64 per seam instead of 12). So the
 // default tile is as wide as the full recompute's, 256, and clean tiles just return early, which
 // saves GPU work without adding latency. ?tile=N on the page tries other widths.
 'use strict';
 
 const WEBGPU_SEAM_CARVER_WGSL = /* wgsl */ `
-override BASE: u32 = 256u;      // columns per base segment, one invocation each (tile width)
-override HALF: u32 = BASE / 2u;  // rows per strip: upward triangles reach HALF columns to each side
+override BASE: u32 = 256u;      // a diamond's width and the distance between centres (tile width)
+override HALF: u32 = BASE / 2u;  // rows per strip, and per half of a diamond
 
 struct Params {
   stride: u32,  // the original width: rows keep their place, the picture shrinks within them
   height: u32,
-  r0: u32,      // the strip's first row, already final
-  rows: u32,    // rows computed below r0 in this strip
+  wave: u32,    // upper halves in strip wave - 1, lower halves in strip wave
+  unused: u32,
 }
 
 struct State {
@@ -64,7 +65,7 @@ var<workgroup> shared_width: u32;
 var<workgroup> shared_column: u32;
 var<workgroup> best_cost: array<f32, BASE>;
 var<workgroup> best_column: array<u32, BASE>;
-var<workgroup> dirty: atomic<u32>;  // zero at the start of every workgroup
+var<workgroup> dirty: array<atomic<u32>, 2>;  // per half; zero at the start of every workgroup
 var<workgroup> shared_dirty: u32;
 
 // The width as a value WGSL knows is the same for the whole workgroup, so barriers may depend on it
@@ -75,16 +76,49 @@ fn uniform_width(local: u32) -> u32 {
   return workgroupUniformLoad(&shared_width);
 }
 
-// Whether any invocation found its tile dirty, as a value the whole workgroup agrees on
-fn uniform_dirty(local: u32, found: bool) -> bool {
+// Whether any invocation found half 0 (upper) or 1 (lower) dirty, as a value the whole
+// workgroup agrees on
+fn uniform_dirty(local: u32, half: u32, found: bool) -> bool {
   if (found) {
-    atomicStore(&dirty, 1u);
+    atomicStore(&dirty[half], 1u);
   }
   workgroupBarrier();
   if (local == 0u) {
-    shared_dirty = atomicLoad(&dirty);
+    shared_dirty = atomicLoad(&dirty[half]);
   }
   return workgroupUniformLoad(&shared_dirty) != 0u;
+}
+
+// The wave's diamonds: their centres, offset(t) + group * BASE, alternate between multiples of
+// BASE and the columns halfway between; the strips of their halves, rows r0 + 1 .. r0 + rows
+fn centre(group: u32) -> u32 {
+  return (params.wave + 1u) % 2u * HALF + group * BASE;
+}
+
+fn upper_r0() -> u32 {
+  return (params.wave - 1u) * HALF;
+}
+
+fn upper_rows() -> u32 {
+  return select(min(HALF, params.height - 1u - upper_r0()), 0u, params.wave == 0u);
+}
+
+fn lower_r0() -> u32 {
+  return params.wave * HALF;
+}
+
+fn lower_rows() -> u32 {
+  return select(0u, min(HALF, params.height - 1u - lower_r0()), lower_r0() + 1u < params.height);
+}
+
+// Cells of a half in its row r0 + k: the upper widens by a column on each side per row, the lower
+// narrows; clipped to the picture. x and c may lie left of it, so signed.
+fn in_upper(x: i32, c: i32, k: u32, w: u32) -> bool {
+  return x >= max(0, c - i32(k)) && x < min(i32(w), c + i32(k));
+}
+
+fn in_lower(x: i32, c: i32, k: u32, w: u32) -> bool {
+  return x >= max(0, c - i32(HALF) + i32(k)) && x < min(i32(w), c + i32(HALF) - i32(k));
 }
 
 fn distance(a: u32, b: u32) -> f32 {
@@ -141,126 +175,94 @@ fn changed_at(y: u32, x: i32, w: u32) -> bool {
   return x >= 0 && x < i32(w) && changed[y * params.stride + u32(x)] == state.epoch;
 }
 
-// The top row costs nothing (the core's -1 counts as 0 for the children)
+// A full recompute's wave. Wave 0 also zeroes the top row's costs under its diamonds (the core's
+// -1 counts as 0 for the children).
 @compute @workgroup_size(BASE)
-fn top_row(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x < state.width) {
-    cost[id.x] = 0.0;
-  }
-}
-
-@compute @workgroup_size(BASE)
-fn downward_triangles(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) local: u32) {
+fn diamonds(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) local: u32) {
   let w = uniform_width(local);
-  let segments = (w + BASE - 1u) / BASE;
-  let i = group.x;
-  if (i >= segments) {
+  let c = centre(group.x);
+  if (c >= w + HALF) {
     return;
   }
-  let a = i * BASE;
-  let x = a + local;
-  for (var k = 1u; k <= params.rows; k++) {
-    // Narrower by one column per row on each side, except at the picture's borders
-    let lo = select(a + k, 0u, i == 0u);
-    let hi = select(a + BASE - k, w, i == segments - 1u);
-    if (x >= lo && x < hi) {
-      relax(x, params.r0 + k, w);
+  let x = i32(c) - i32(HALF) + i32(local);
+  if (params.wave == 0u) {
+    if (x >= 0 && x < i32(w)) {
+      cost[u32(x)] = 0.0;
+    }
+    storageBarrier();
+  }
+  let r0 = upper_r0();
+  for (var k = 1u; k <= upper_rows(); k++) {
+    if (in_upper(x, i32(c), k, w)) {
+      relax(u32(x), r0 + k, w);
+    }
+    storageBarrier();
+  }
+  let r1 = lower_r0();
+  for (var k = 1u; k <= lower_rows(); k++) {
+    if (in_lower(x, i32(c), k, w)) {
+      relax(u32(x), r1 + k, w);
     }
     storageBarrier();
   }
 }
 
+// An incremental update's wave: each half is tested apart and returns at once if clean. The
+// upper half reads row r0 under its tip and, at its sides, two columns either side of its
+// previous row, from the previous wave's lower halves; the lower half reads only the upper half's
+// last row. Each test spreads its cells over the invocations, one row each for the seeds.
 @compute @workgroup_size(BASE)
-fn upward_triangles(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) local: u32) {
+fn dirty_diamonds(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) local: u32) {
   let w = uniform_width(local);
-  let segments = (w + BASE - 1u) / BASE;
-  let boundary = (group.x + 1u) * BASE;
-  if (group.x + 1u >= segments) {
+  let c = centre(group.x);
+  if (c >= w + HALF) {
     return;
   }
-  let x = boundary - HALF + local;
-  for (var k = 1u; k <= params.rows; k++) {
-    // Columns [boundary - k, boundary + k): what both neighbours' downward triangles left out
-    if (x + k >= boundary && x < boundary + k && x < w) {
-      relax(x, params.r0 + k, w);
-    }
-    storageBarrier();
-  }
-}
-
-// The downward triangles of an incremental update: a tile reads only row r0 under its first row
-@compute @workgroup_size(BASE)
-fn dirty_downward(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) local: u32) {
-  let w = uniform_width(local);
-  let segments = (w + BASE - 1u) / BASE;
-  let i = group.x;
-  if (i >= segments) {
-    return;
-  }
-  let a = i * BASE;
-  let first = i == 0u;
-  let last = i == segments - 1u;
-  // Dirty if a cell of row r0 it reads changed, or a row holds a seed (one row per invocation)
-  var found = false;
-  let lo1 = select(a + 1u, 0u, first);
-  let hi1 = select(a + BASE - 1u, w, last);
-  for (var x = i32(lo1) - 1 + i32(local); x <= i32(hi1); x += i32(BASE)) {
-    found = found || changed_at(params.r0, x, w);
-  }
-  let row = local + 1u;
-  if (row <= params.rows) {
-    found = found || seeded(params.r0 + row, select(a + row, 0u, first), select(a + BASE - row, w, last));
-  }
-  if (!uniform_dirty(local, found)) {
-    return;
-  }
+  let ci = i32(c);
+  let x = ci - i32(HALF) + i32(local);
   let epoch = state.epoch;
-  let x = a + local;
-  for (var k = 1u; k <= params.rows; k++) {
-    let lo = select(a + k, 0u, first);
-    let hi = select(a + BASE - k, w, last);
-    if (x >= lo && x < hi) {
-      relax_tracked(x, params.r0 + k, w, epoch);
-    }
-    storageBarrier();
-  }
-}
-
-// The upward triangles of an incremental update: a tile reads row r0 under its tip and, below
-// that, the two columns on each side of its previous row, from the downward triangles
-@compute @workgroup_size(BASE)
-fn dirty_upward(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) local: u32) {
-  let w = uniform_width(local);
-  let segments = (w + BASE - 1u) / BASE;
-  let boundary = (group.x + 1u) * BASE;
-  if (group.x + 1u >= segments) {
-    return;
-  }
-  var found = false;
-  for (var d = local; d < 4u; d += BASE) {  // row r0 under the tip: columns boundary - 2 .. boundary + 1
-    found = found || changed_at(params.r0, i32(boundary) - 2 + i32(d), w);
-  }
   let k = local + 1u;
-  if (k <= params.rows) {
-    found = found || seeded(params.r0 + k, boundary - k, min(w, boundary + k));
-    if (k > 1u) {
-      let y = params.r0 + k - 1u;
-      let c = i32(boundary);
-      let d = i32(k);
-      found = found || changed_at(y, c - d - 1, w) || changed_at(y, c - d, w) ||
-              changed_at(y, c + d - 1, w) || changed_at(y, c + d, w);
+  if (params.wave > 0u) {
+    let r0 = upper_r0();
+    let rows = upper_rows();
+    var found = false;
+    for (var d = local; d < 4u; d += BASE) {  // under the tip: columns c - 2 .. c + 1
+      found = found || changed_at(r0, ci - 2 + i32(d), w);
+    }
+    if (k <= rows) {
+      found = found || seeded(r0 + k, u32(max(0, ci - i32(k))), u32(min(i32(w), ci + i32(k))));
+      if (k > 1u) {
+        let y = r0 + k - 1u;
+        let d = i32(k);
+        found = found || changed_at(y, ci - d - 1, w) || changed_at(y, ci - d, w) ||
+                changed_at(y, ci + d - 1, w) || changed_at(y, ci + d, w);
+      }
+    }
+    if (uniform_dirty(local, 0u, found)) {
+      for (var j = 1u; j <= rows; j++) {
+        if (in_upper(x, ci, j, w)) {
+          relax_tracked(u32(x), r0 + j, w, epoch);
+        }
+        storageBarrier();
+      }
     }
   }
-  if (!uniform_dirty(local, found)) {
-    return;
-  }
-  let epoch = state.epoch;
-  let x = boundary - HALF + local;
-  for (var k = 1u; k <= params.rows; k++) {
-    if (x + k >= boundary && x < boundary + k && x < w) {
-      relax_tracked(x, params.r0 + k, w, epoch);
+  let rows = lower_rows();
+  if (rows > 0u) {
+    let r0 = lower_r0();
+    // Row r0 under the first row: the upper half's last row, one column per invocation
+    var found = changed_at(r0, x, w);
+    if (k <= rows) {
+      found = found || seeded(r0 + k, u32(max(0, ci - i32(HALF) + i32(k))), u32(min(i32(w), ci + i32(HALF) - i32(k))));
     }
-    storageBarrier();
+    if (uniform_dirty(local, 1u, found)) {
+      for (var j = 1u; j <= rows; j++) {
+        if (in_lower(x, ci, j, w)) {
+          relax_tracked(u32(x), r0 + j, w, epoch);
+        }
+        storageBarrier();
+      }
+    }
   }
 }
 
@@ -393,7 +395,7 @@ class WebGPUSeamCarver {
     });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     const pipelines = {};
-    for (const entryPoint of ['top_row', 'downward_triangles', 'upward_triangles', 'trace_seam', 'remove_seam', 'narrow']) {
+    for (const entryPoint of ['diamonds', 'trace_seam', 'remove_seam', 'narrow']) {
       pipelines[entryPoint] = await device.createComputePipelineAsync({
         layout: pipelineLayout, compute: { module, entryPoint, constants: { BASE: 256 } },
       });
@@ -410,17 +412,16 @@ class WebGPUSeamCarver {
     return device;
   }
 
-  // The incremental update's two pipelines for a tile width, compiled on first use
+  // The incremental update's pipeline for a tile width, compiled on first use
   static incrementalPipelines(tile) {
     const { device, module, pipelineLayout, tilePipelines } = WebGPUSeamCarver;
     if (!Number.isInteger(tile) || tile < 2 || tile % 2 || tile > device.limits.maxComputeInvocationsPerWorkgroup) {
       throw new RangeError(`the tile width must be even, from 2 to ${device.limits.maxComputeInvocationsPerWorkgroup}`);
     }
     if (!tilePipelines.has(tile)) {
-      const pipeline = (entryPoint) => device.createComputePipeline({
-        layout: pipelineLayout, compute: { module, entryPoint, constants: { BASE: tile } },
-      });
-      tilePipelines.set(tile, { downward: pipeline('dirty_downward'), upward: pipeline('dirty_upward') });
+      tilePipelines.set(tile, device.createComputePipeline({
+        layout: pipelineLayout, compute: { module, entryPoint: 'dirty_diamonds', constants: { BASE: tile } },
+      }));
     }
     return tilePipelines.get(tile);
   }
@@ -445,7 +446,7 @@ class WebGPUSeamCarver {
     this._height = height;
     this.stride = width;  // rows keep their place in the buffers while the picture narrows
     this.tile = WebGPUSeamCarver.tile;
-    this.tilePipelines = WebGPUSeamCarver.incrementalPipelines(this.tile);
+    this.tilePipeline = WebGPUSeamCarver.incrementalPipelines(this.tile);
     this.hasRemoved = false;  // costs fit the picture after the last removed seam (WebGPU zeroes new buffers)
 
     const packed = new Uint32Array(width * height);
@@ -462,16 +463,15 @@ class WebGPUSeamCarver {
     this.state = buffer(8, GPUBufferUsage.COPY_DST);
     device.queue.writeBuffer(this.state, 0, new Uint32Array([width, 0]));
 
-    // Parameters per strip, at the offsets dynamic uniform bindings require, for the full
-    // recompute's strips of 128 rows and the incremental update's of tile / 2. Entry 0 also
-    // serves the passes outside the strips, which only read stride and height.
+    // Parameters per wave, at the offsets dynamic uniform bindings require, for the full
+    // recompute's diamonds 256 wide and the incremental update's tile wide. Entry 0 also serves
+    // the passes outside the waves, which only read stride and height.
     this.align = device.limits.minUniformBufferOffsetAlignment;
     const tiling = (half) => {
-      const strips = Math.ceil((height - 1) / half);
-      const params = new Uint32Array((Math.max(strips, 1) * this.align) / 4);
-      for (let s = 0; s < Math.max(strips, 1); s++) {
-        const r0 = s * half;
-        params.set([width, height, r0, Math.max(0, Math.min(half, height - 1 - r0))], (s * this.align) / 4);
+      const waves = Math.ceil((height - 1) / half) + 1;
+      const params = new Uint32Array((waves * this.align) / 4);
+      for (let t = 0; t < waves; t++) {
+        params.set([width, height, t, 0], (t * this.align) / 4);
       }
       const uniforms = device.createBuffer({ size: params.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(uniforms, 0, params);
@@ -484,7 +484,7 @@ class WebGPUSeamCarver {
         ],
       });
       // Dispatch sizes cover the original width; workgroups beyond the current width do nothing
-      return { strips, uniforms, bindGroup, segments: Math.ceil(width / (2 * half)) };
+      return { waves, uniforms, bindGroup, diamonds: Math.floor((width + half - 1) / (2 * half)) + 1 };
     };
     this.full = tiling(128);
     this.incremental = tiling(this.tile / 2);
@@ -502,26 +502,19 @@ class WebGPUSeamCarver {
     const { device, pipelines } = WebGPUSeamCarver;
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    const run = (pipeline, tiling, groups, strip = 0) => {
+    const run = (pipeline, tiling, groups, wave = 0) => {
       if (groups > 0) {
         pass.setPipeline(pipeline);
-        pass.setBindGroup(0, tiling.bindGroup, [strip * this.align]);
+        pass.setBindGroup(0, tiling.bindGroup, [wave * this.align]);
         pass.dispatchWorkgroups(groups);
       }
     };
     const { full, incremental } = this;
     for (let n = 0; n < pixelsToShrink; n++) {
-      if (incrementalCostUpdates && this.hasRemoved) {
-        for (let s = 0; s < incremental.strips; s++) {
-          run(this.tilePipelines.downward, incremental, incremental.segments, s);
-          run(this.tilePipelines.upward, incremental, incremental.segments - 1, s);
-        }
-      } else {
-        run(pipelines.top_row, full, full.segments);
-        for (let s = 0; s < full.strips; s++) {
-          run(pipelines.downward_triangles, full, full.segments, s);
-          run(pipelines.upward_triangles, full, full.segments - 1, s);
-        }
+      const [tiling, pipeline] = incrementalCostUpdates && this.hasRemoved ?
+        [incremental, this.tilePipeline] : [full, pipelines.diamonds];
+      for (let t = 0; t < tiling.waves; t++) {
+        run(pipeline, tiling, tiling.diamonds, t);
       }
       run(pipelines.trace_seam, full, 1);
       run(pipelines.remove_seam, full, this._height);

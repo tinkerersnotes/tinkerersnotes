@@ -378,14 +378,14 @@ const engines = {
   js: { name: 'the JavaScript port', core: SeamCarver, module: null, note: '' },
   tiled: {
     name: 'C++ on several threads', core: null, module: null,
-    note: 'The costs live in flat arrays and are split over the threads by triangle tiling. With ' +
+    note: 'The costs live in flat arrays and are split over the threads by diamond tiling. With ' +
           'incremental updates, only the tiles a seam changed are recomputed, in tiles 32 columns ' +
           'wide (?tile=N in the address tries other widths); without, every seam is a full ' +
           'recompute. It removes the same seams as the C++ core.',
   },
   webgpu: {
     name: 'WebGPU from JavaScript', core: null, module: null,
-    note: 'The costs are computed on the GPU, in compute passes tiled by triangles. With ' +
+    note: 'The costs are computed on the GPU, in compute passes tiled by diamonds. With ' +
           'incremental updates, tiles a seam left unchanged return at once (tiles 256 wide; ?tile=N ' +
           'tries narrower ones, which need more passes). WGSL ' +
           'has no 64-bit floats, so costs are 32-bit: where two paths cost almost the same, it may ' +

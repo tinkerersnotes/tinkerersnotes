@@ -1,4 +1,4 @@
-// Seam carver whose path cost propagation runs on several threads, tiled by triangles. Header-only:
+// Seam carver whose path cost propagation runs on several threads, tiled by diamonds. Header-only:
 // used by the WebAssembly page (../wasm_seam_carver/tiled_seam_carver_wasm.cpp) and checked against
 // the core by tiled_seam_carver.cpp, which also has a write-once checker for the tiling.
 //
@@ -8,12 +8,26 @@
 // the leftmost cheapest bottom pixel. So the result matches the core bit for bit, with or without
 // incremental updates.
 //
-// Tiling, per strip of h = base / 2 rows below a fully computed row r0:
-//   phase A  each task owns a base segment [a, b) of row r0 and fills the downward triangle
-//            [a + k, b - k) of row r0 + k; segments at the image border don't shrink on that side
-//   phase B  each boundary c between two segments fills the upward triangle [c - k, c + k),
-//            which reads the sides of both neighbouring triangles from phase A
-// Two barriers per strip. Neighbouring upward triangles never overlap, since base >= 2.
+// Diamond tiling. Rows below the top one are cut into strips of h = base / 2 rows, s = 0, 1, ...;
+// strip s holds rows r0 + 1 .. r0 + h, r0 = s * h. Every wave is one row of diamonds, centred on
+// columns c spaced p = 2h apart, and a barrier follows each wave. The diamond of wave t at c:
+//   upper half  strip t - 1, the upward triangle [c - k, c + k) of row r0 + k: it reads row r0
+//               under its tip and, at its sides, the lower halves of the previous wave
+//   lower half  strip t, the downward triangle [c - h + k, c + h - k) of row r0 + k: it reads
+//               only the upper half's last row [c - h, c + h), so the same thread goes on
+//               without waiting
+// Wave t's centres are offset by h from wave t - 1's, so its upper halves fill the gaps between
+// the previous lower halves. Wave 0 has only lower halves (and zeroes the top row's costs under
+// them), the last wave only upper halves. Halves are clipped to the picture; neighbouring halves
+// never overlap. So strips + 1 waves per seam, where separate up and down triangles took two per
+// strip: on tundra 31 instead of 60 with base 64. base is rounded down to even.
+//
+// Fewer barriers matter less than it seems: one costs about a microsecond natively, and most of
+// the time threads wait at barriers they spend idle, waiting for the wave's slowest tile. On 4
+// cores (Linux VM on Apple silicon), 600 seams of tundra with full recomputes took 2090 ms in
+// diamonds 64 wide against 2160 ms in triangles; the best tile width also moved, from 128 for
+// triangles (2460 ms) down to 64. With incremental updates in tiles 32 wide, 610 ms against
+// 650 ms: 64 barriers per seam instead of 124, 190 ms of waiting per thread instead of 210.
 //
 // Incremental updates: removing a seam shifts every row's cells right of it one column left, with
 // their costs and parents, so most of them stay right. A cell can only change if a parent's colour
@@ -23,10 +37,9 @@
 // ("dirty" tiles); recomputing marks each cell whose cost changed with the seam's epoch. Every
 // clean tile's cells have unchanged inputs, so their stored values are still those of a full
 // recompute. On tundra, tiles 32 wide recompute 1.21x the cells the core's incremental update
-// evaluates, 16% of a full recompute. 600 seams on 4 cores (Linux VM on Apple silicon) took 650 ms
-// with 4 threads and 1314 ms with one, against 1592 ms for the core's incremental update and
-// 3063 ms for full recomputes on 4 threads. Tiles 16 wide took 772 ms, 8 wide 1436 ms: narrower
-// tiles waste less work but need more barriers, two per strip of base / 2 rows.
+// evaluates, 16% of a full recompute. 600 seams on 4 cores took 610 ms with 4 threads and 1355 ms
+// with one, against 1592 ms for the core's incremental update. Tiles 16 wide took 680 ms, 8 wide
+// 1160 ms: narrower tiles waste less work but need more barriers, one per strip of base / 2 rows.
 #pragma once
 
 #include <algorithm>
@@ -109,11 +122,17 @@ private:
 
 class TiledSeamCarver {
 public:
+    // Tile widths: 600 seams of tundra on 4 threads took 2090 ms with full recomputes in tiles 64
+    // wide (2310 ms 128 wide, 2160 ms 32 wide) and 610 ms with incremental updates in tiles 32 wide
+    // (680 ms 16 wide, 650 ms 48 wide)
+    static constexpr int default_base = 64;
+    static constexpr int default_incremental_base = 32;
+
     // rgb is a row-major buffer of width * height * 3 bytes. base: tile width of full recomputes;
     // incremental_base: tile width of incremental updates, smaller since few tiles are dirty
     // spins: barrier checks before sleeping, negative for SleepingBarrier::default_spins()
-    TiledSeamCarver(const std::uint8_t* rgb, int width, int height, int threads, int base = 128,
-                    int spins = -1, int incremental_base = 32)
+    TiledSeamCarver(const std::uint8_t* rgb, int width, int height, int threads, int base = default_base,
+                    int spins = -1, int incremental_base = default_incremental_base)
         : stride_(width), width_(width), height_(height), threads_(threads), base_(base),
           spins_(spins >= 0 ? spins : SleepingBarrier::default_spins(threads)), incremental_base_(incremental_base) {
         if (rgb == nullptr || width <= 0 || height <= 0) {
@@ -131,7 +150,7 @@ public:
         removed_.resize(height);
         seed_lo_.resize(height);
         seed_hi_.resize(height);
-        const int strips = (height - 1 + incremental_base / 2 - 1) / (incremental_base / 2) + 1;
+        const int strips = (height - 1 + incremental_base / 2 - 1) / (incremental_base / 2) + 1;  // and one more
         strip_seed_lo_.resize(strips);
         strip_seed_hi_.resize(strips);
         changed_lo_ = std::vector<std::atomic<int>>(strips);
@@ -159,10 +178,13 @@ public:
         if (pixels_to_shrink == 0) {
             return;
         }
+        if (incremental_cost_updates && has_removed_) {
+            prepare_update();  // the following seams' updates are prepared between seams
+        }
         SleepingBarrier sync(threads_, spins_);
         auto worker = [&](int tid) {
             for (int s = 0; s < pixels_to_shrink; ++s) {
-                remove_seam(tid, sync, incremental_cost_updates);
+                remove_seam(tid, sync, incremental_cost_updates, s + 1 < pixels_to_shrink);
             }
         };
         std::vector<std::thread> pool;
@@ -255,29 +277,37 @@ private:
         }
     }
 
+    // The diamond tiling of a seam with half height h (see the top of the file): strips, rows of
+    // strip s, wave t's first centre, and the clipped cells of a diamond's halves in row r0 + k
+    struct Diamonds {
+        int h, p, w, height, strips;
+        Diamonds(int base, int width, int height_)
+            : h(base / 2), p(2 * (base / 2)), w(width), height(height_), strips((height_ - 2 + base / 2) / (base / 2)) {}
+        int r0(int s) const { return s * h; }
+        int rows(int s) const { return std::min(h, height - 1 - s * h); }
+        int offset(int t) const { return (t + 1) % 2 * h; }  // wave t's centres: offset(t) + j * p
+        int centres(int t) const { return w + h - 1 - offset(t) < 0 ? 0 : (w + h - 1 - offset(t)) / p + 1; }
+        int up_lo(int c, int k) const { return std::max(0, c - k); }
+        int up_hi(int c, int k) const { return std::min(w, c + k); }
+        int down_lo(int c, int k) const { return std::max(0, c - h + k); }
+        int down_hi(int c, int k) const { return std::min(w, c + h - k); }
+    };
+
     // Full recompute of every cell, tiled with base_
     void propagate_all(int tid, SleepingBarrier& sync, int w) {
-        const int tasks = (w + base_ - 1) / base_;
-        const int h = base_ / 2;
-        if (tid == 0) {
-            std::fill_n(cost_.begin(), w, 0.0);  // the core's -1 top row cost counts as 0
-        }
-        sync.arrive_and_wait();
-        for (int r0 = 0; r0 < height_ - 1; r0 += h) {
-            const int rows = std::min(h, height_ - 1 - r0);
-            // Phase A: downward triangles over each base segment
-            for (int i = tid; i < tasks; i += threads_) {
-                const int a = i * base_, b = std::min(w, a + base_);
-                for (int k = 1; k <= rows; ++k) {
-                    relax_range<false>(i == 0 ? 0 : a + k, i == tasks - 1 ? w : b - k, r0 + k, tid);
+        const Diamonds d(base_, w, height_);
+        for (int t = 0; t <= d.strips; ++t) {
+            for (int j = tid; j < d.centres(t); j += threads_) {
+                const int c = d.offset(t) + j * d.p;
+                if (t == 0) {  // the core's -1 top row cost counts as 0
+                    std::fill(cost_.begin() + std::max(0, c - d.h), cost_.begin() + std::min(w, c + d.h), 0.0);
+                } else {
+                    const int r0 = d.r0(t - 1);
+                    for (int k = 1; k <= d.rows(t - 1); ++k) relax_range<false>(d.up_lo(c, k), d.up_hi(c, k), r0 + k, tid);
                 }
-            }
-            sync.arrive_and_wait();
-            // Phase B: upward triangles at the boundaries between segments
-            for (int j = 1 + tid; j < tasks; j += threads_) {
-                const int boundary = j * base_;
-                for (int k = 1; k <= rows; ++k) {
-                    relax_range<false>(std::max(0, boundary - k), std::min(w, boundary + k), r0 + k, tid);
+                if (t < d.strips) {
+                    const int r0 = d.r0(t);
+                    for (int k = 1; k <= d.rows(t); ++k) relax_range<false>(d.down_lo(c, k), d.down_hi(c, k), r0 + k, tid);
                 }
             }
             sync.arrive_and_wait();
@@ -323,74 +353,88 @@ private:
         }
     }
 
-    // Recomputes the dirty tiles of an incremental tiling, after the last removed seam's columns
-    // (removed_) gave the seeds and the epoch was advanced. Changes spread from the seeds and from
-    // changed cells of the row above, so per strip only tiles near those columns are tested.
+    // Recomputes the dirty halves of an incremental diamond tiling, once prepare_update() gave the
+    // seeds of the last removed seam and advanced the epoch. Each half is tested on its own: the
+    // upper one by the cells it reads outside itself, the lower one by its upper half's last row,
+    // which the same thread just recomputed or left alone. Changes spread from the seeds and from
+    // changed cells of a strip's top row, by at most h columns per strip, so per wave only diamonds
+    // near those columns are tested.
     void propagate_dirty(int tid, SleepingBarrier& sync, int w) {
-        const int base = incremental_base_, h = base / 2;
-        const int tasks = (w + base - 1) / base;
-        for (int s = 0, r0 = 0; r0 < height_ - 1; ++s, r0 += h) {
-            const int rows = std::min(h, height_ - 1 - r0);
-            const int near_lo = std::min(strip_seed_lo_[s], changed_lo_[s].load(std::memory_order_relaxed) - 1);
-            const int near_hi = std::max(strip_seed_hi_[s], changed_hi_[s].load(std::memory_order_relaxed) + 1);
-            const int first = std::max(0, near_lo / base - 1), last = std::min(tasks - 1, near_hi / base + 1);
-            // Phase A: a downward triangle reads only row r0, under its first row
-            for (int i = first + tid; i <= last; i += threads_) {
-                const int a = i * base, b = std::min(w, a + base);
-                auto lo = [&](int k) { return i == 0 ? 0 : a + k; };
-                auto hi = [&](int k) { return i == tasks - 1 ? w : b - k; };
-                bool dirty = changed_in(r0, lo(1) - 1, hi(1));
-                for (int k = 1; k <= rows && !dirty; ++k) dirty = seeded(r0 + k, lo(k), hi(k));
-                if (dirty) recompute_tile(s, r0, rows, lo, hi, tid);
+        const Diamonds d(incremental_base_, w, height_);
+        for (int t = 0; t <= d.strips; ++t) {
+            int near_lo = INT_MAX, near_hi = INT_MIN;
+            if (t > 0) {
+                near_lo = std::min(strip_seed_lo_[t - 1], changed_lo_[t - 1].load(std::memory_order_relaxed) - 1);
+                near_hi = std::max(strip_seed_hi_[t - 1], changed_hi_[t - 1].load(std::memory_order_relaxed) + 1);
             }
-            sync.arrive_and_wait();
-            // Phase B: an upward triangle reads row r0 under its tip and, below that, the two
-            // columns on each side of its previous row, which belong to the downward triangles
-            for (int j = std::max(1, first) + tid; j <= std::min(tasks - 1, last + 1); j += threads_) {
-                const int c = j * base;
-                auto lo = [&](int k) { return std::max(0, c - k); };
-                auto hi = [&](int k) { return std::min(w, c + k); };
-                bool dirty = changed_in(r0, c - 2, c + 1);
-                for (int k = 1; k <= rows && !dirty; ++k) {
-                    dirty = seeded(r0 + k, lo(k), hi(k)) ||
-                            (k > 1 && (changed_in(r0 + k - 1, c - k - 1, c - k) || changed_in(r0 + k - 1, c + k - 1, c + k)));
+            if (t < d.strips) {
+                near_lo = std::min(near_lo, strip_seed_lo_[t]);
+                near_hi = std::max(near_hi, strip_seed_hi_[t]);
+            }
+            // An upper half reads the lower halves h columns either side, whose changes came from
+            // up to h columns further out
+            const int first = std::max(0, (near_lo - d.p - 2 - d.offset(t)) / d.p);
+            const int last = std::min(d.centres(t) - 1, (near_hi + d.p + 2 - d.offset(t)) / d.p);
+            for (int j = first + tid; near_lo <= near_hi && j <= last; j += threads_) {
+                const int c = d.offset(t) + j * d.p;
+                if (t > 0) {  // under its tip, then two columns either side of its previous row
+                    const int s = t - 1, r0 = d.r0(s);
+                    bool dirty = changed_in(r0, c - 2, c + 1);
+                    for (int k = 1; k <= d.rows(s) && !dirty; ++k) {
+                        dirty = seeded(r0 + k, d.up_lo(c, k), d.up_hi(c, k)) ||
+                                (k > 1 && (changed_in(r0 + k - 1, c - k - 1, c - k) || changed_in(r0 + k - 1, c + k - 1, c + k)));
+                    }
+                    if (dirty) {
+                        recompute_tile(s, r0, d.rows(s), [&](int k) { return d.up_lo(c, k); }, [&](int k) { return d.up_hi(c, k); }, tid);
+                    }
                 }
-                if (dirty) recompute_tile(s, r0, rows, lo, hi, tid);
+                if (t < d.strips) {  // the row above its first row: the upper half's last row
+                    const int r0 = d.r0(t);
+                    bool dirty = changed_in(r0, d.down_lo(c, 1) - 1, d.down_hi(c, 1));
+                    for (int k = 1; k <= d.rows(t) && !dirty; ++k) dirty = seeded(r0 + k, d.down_lo(c, k), d.down_hi(c, k));
+                    if (dirty) {
+                        recompute_tile(t, r0, d.rows(t), [&](int k) { return d.down_lo(c, k); }, [&](int k) { return d.down_hi(c, k); }, tid);
+                    }
+                }
             }
             sync.arrive_and_wait();
         }
     }
 
+    // Seeds of an incremental update after removed_, the last removed seam, and a new epoch.
+    // Run by one thread between seams.
+    void prepare_update() {
+        ++epoch_;
+        // Seeds: cells whose parents moved, around the removed seam in the new columns.
+        // Wider than strictly needed; recomputing a few extra cells is harmless.
+        seed_lo_[0] = 1;
+        seed_hi_[0] = 0;  // the top row never changes
+        for (int y = 1; y < height_; ++y) {
+            seed_lo_[y] = std::min(removed_[y], removed_[y - 1]) - 2;
+            seed_hi_[y] = std::max(removed_[y], removed_[y - 1]) + 1;
+        }
+        // Per strip of the incremental tiling: the seeds' columns over its rows, and none of its
+        // top row's columns changed yet
+        const int h = incremental_base_ / 2;
+        for (std::size_t s = 0; s < strip_seed_lo_.size(); ++s) {
+            int lo = INT_MAX, hi = INT_MIN;
+            for (int y = static_cast<int>(s) * h + 1; y <= std::min(height_ - 1, static_cast<int>(s + 1) * h); ++y) {
+                lo = std::min(lo, seed_lo_[y]);
+                hi = std::max(hi, seed_hi_[y]);
+            }
+            strip_seed_lo_[s] = lo;
+            strip_seed_hi_[s] = hi;
+            changed_lo_[s].store(INT_MAX, std::memory_order_relaxed);
+            changed_hi_[s].store(INT_MIN + 1, std::memory_order_relaxed);
+        }
+    }
+
     // One seam, run by every thread. width_ only changes between barriers.
-    void remove_seam(int tid, SleepingBarrier& sync, bool incremental) {
+    // Barriers per seam: one per wave, then after the trace, the shift and the width update.
+    // prepare_update() for the next seam rides on the last one.
+    void remove_seam(int tid, SleepingBarrier& sync, bool incremental, bool another) {
         const int w = width_;
         if (incremental && has_removed_) {
-            if (tid == 0) {
-                ++epoch_;
-                // Seeds: cells whose parents moved, around the removed seam in the new columns.
-                // Wider than strictly needed; recomputing a few extra cells is harmless.
-                seed_lo_[0] = 1;
-                seed_hi_[0] = 0;  // the top row never changes
-                for (int y = 1; y < height_; ++y) {
-                    seed_lo_[y] = std::min(removed_[y], removed_[y - 1]) - 2;
-                    seed_hi_[y] = std::max(removed_[y], removed_[y - 1]) + 1;
-                }
-                // Per strip of the incremental tiling: the seeds' columns over its rows, and none
-                // of its top row's columns changed yet
-                const int h = incremental_base_ / 2;
-                for (std::size_t s = 0; s < strip_seed_lo_.size(); ++s) {
-                    int lo = INT_MAX, hi = INT_MIN;
-                    for (int y = static_cast<int>(s) * h + 1; y <= std::min(height_ - 1, static_cast<int>(s + 1) * h); ++y) {
-                        lo = std::min(lo, seed_lo_[y]);
-                        hi = std::max(hi, seed_hi_[y]);
-                    }
-                    strip_seed_lo_[s] = lo;
-                    strip_seed_hi_[s] = hi;
-                    changed_lo_[s].store(INT_MAX, std::memory_order_relaxed);
-                    changed_hi_[s].store(INT_MIN + 1, std::memory_order_relaxed);
-                }
-            }
-            sync.arrive_and_wait();
             propagate_dirty(tid, sync, w);
         } else {
             propagate_all(tid, sync, w);
@@ -417,6 +461,9 @@ private:
             --width_;
             removed_.swap(seam_);
             has_removed_ = incremental;
+            if (incremental && another) {
+                prepare_update();
+            }
         }
         sync.arrive_and_wait();
     }

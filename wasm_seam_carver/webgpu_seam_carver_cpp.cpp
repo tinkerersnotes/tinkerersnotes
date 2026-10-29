@@ -37,10 +37,6 @@ const char kWgsl[] =
 
 std::string text(wgpu::StringView view) { return std::string(std::string_view(view)); }
 
-struct Pipelines {
-    wgpu::ComputePipeline downward, upward;
-};
-
 // The device and everything carvers share, created once by init()
 struct Gpu {
     wgpu::Instance instance;
@@ -50,9 +46,9 @@ struct Gpu {
     wgpu::BindGroupLayout layout;
     wgpu::PipelineLayout pipeline_layout;
     struct {  // the full recompute's, BASE = 256
-        wgpu::ComputePipeline top_row, downward, upward, trace_seam, remove_seam, narrow;
+        wgpu::ComputePipeline diamonds, trace_seam, remove_seam, narrow;
     } full;
-    std::map<int, Pipelines> tiles;                    // incremental tile width -> pipelines
+    std::map<int, wgpu::ComputePipeline> tiles;        // incremental tile width -> pipeline
     wgpu::Buffer distance_table;
     wgpu::Limits limits;
 };
@@ -67,13 +63,13 @@ wgpu::ComputePipeline pipeline(const char* entry_point, int base) {
     return gpu->device.CreateComputePipeline(&descriptor);
 }
 
-const Pipelines& incremental_pipelines(int tile) {
+const wgpu::ComputePipeline& incremental_pipeline(int tile) {
     if (tile < 2 || tile % 2 || uint32_t(tile) > gpu->limits.maxComputeInvocationsPerWorkgroup) {
         throw std::invalid_argument("the tile width must be even, from 2 to the workgroup size limit");
     }
     auto it = gpu->tiles.find(tile);
     if (it == gpu->tiles.end()) {
-        it = gpu->tiles.emplace(tile, Pipelines{pipeline("dirty_downward", tile), pipeline("dirty_upward", tile)}).first;
+        it = gpu->tiles.emplace(tile, pipeline("dirty_diamonds", tile)).first;
     }
     return it->second;
 }
@@ -105,8 +101,7 @@ void create_shared_objects(wgpu::Device device) {
     gpu->layout = device.CreateBindGroupLayout(&layout_descriptor);
     wgpu::PipelineLayoutDescriptor pipeline_layout_descriptor{.bindGroupLayoutCount = 1, .bindGroupLayouts = &gpu->layout};
     gpu->pipeline_layout = device.CreatePipelineLayout(&pipeline_layout_descriptor);
-    gpu->full = {pipeline("top_row", 256), pipeline("downward_triangles", 256), pipeline("upward_triangles", 256),
-                 pipeline("trace_seam", 256), pipeline("remove_seam", 256), pipeline("narrow", 256)};
+    gpu->full = {pipeline("diamonds", 256), pipeline("trace_seam", 256), pipeline("remove_seam", 256), pipeline("narrow", 256)};
 
     // Distances between two pixels: the f32 square root of every possible integer dr² + dg² + db²,
     // rounded from the double square root like JavaScript's Float32Array does
@@ -183,7 +178,7 @@ public:
         if (cell_bytes > gpu->limits.maxStorageBufferBindingSize || uint32_t(height) > gpu->limits.maxComputeWorkgroupsPerDimension) {
             throw std::range_error("too many pixels for this GPU");
         }
-        tile_pipelines_ = &incremental_pipelines(tile);
+        tile_pipeline_ = &incremental_pipeline(tile);
 
         std::vector<uint32_t> packed(size_t(width) * height);
         for (size_t i = 0; i < packed.size(); ++i) {
@@ -219,26 +214,19 @@ public:
         }
         wgpu::CommandEncoder encoder = gpu->device.CreateCommandEncoder();
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
-        auto run = [&](const wgpu::ComputePipeline& pipeline, const Tiling& tiling, uint32_t groups, uint32_t strip = 0) {
+        auto run = [&](const wgpu::ComputePipeline& pipeline, const Tiling& tiling, uint32_t groups, uint32_t wave = 0) {
             if (groups > 0) {
-                const uint32_t offset = strip * align_;
+                const uint32_t offset = wave * align_;
                 pass.SetPipeline(pipeline);
                 pass.SetBindGroup(0, tiling.bind_group, 1, &offset);
                 pass.DispatchWorkgroups(groups);
             }
         };
         for (int n = 0; n < pixels_to_shrink; ++n) {
-            if (incremental && has_removed_) {
-                for (uint32_t s = 0; s < incremental_.strips; ++s) {
-                    run(tile_pipelines_->downward, incremental_, incremental_.segments, s);
-                    run(tile_pipelines_->upward, incremental_, incremental_.segments - 1, s);
-                }
-            } else {
-                run(gpu->full.top_row, full_, full_.segments);
-                for (uint32_t s = 0; s < full_.strips; ++s) {
-                    run(gpu->full.downward, full_, full_.segments, s);
-                    run(gpu->full.upward, full_, full_.segments - 1, s);
-                }
+            const bool update = incremental && has_removed_;
+            const Tiling& tiling = update ? incremental_ : full_;
+            for (uint32_t t = 0; t < tiling.waves; ++t) {
+                run(update ? *tile_pipeline_ : gpu->full.diamonds, tiling, tiling.diamonds, t);
             }
             run(gpu->full.trace_seam, full_, 1);
             run(gpu->full.remove_seam, full_, uint32_t(height_));
@@ -297,23 +285,20 @@ public:
 
 private:
     struct Tiling {
-        uint32_t strips = 0, segments = 0;
+        uint32_t waves = 0, diamonds = 0;
         wgpu::Buffer uniforms;
         wgpu::BindGroup bind_group;
     };
 
-    // Parameters per strip of half rows, at the offsets dynamic uniform bindings require; entry 0
-    // also serves the passes outside the strips, which only read stride and height
+    // Parameters per wave of diamonds 2 * half wide, at the offsets dynamic uniform bindings
+    // require; entry 0 also serves the passes outside the waves, which only read stride and height
     Tiling tiling(int half) {
         Tiling t;
-        t.strips = uint32_t((height_ - 1 + half - 1) / half);
-        const uint32_t entries = std::max<uint32_t>(t.strips, 1);
-        std::vector<uint32_t> params(entries * align_ / 4);
-        for (uint32_t s = 0; s < entries; ++s) {
-            const int r0 = int(s) * half;
-            const uint32_t entry[] = {uint32_t(stride_), uint32_t(height_), uint32_t(r0),
-                                      uint32_t(std::max(0, std::min(half, height_ - 1 - r0)))};
-            std::copy(std::begin(entry), std::end(entry), params.begin() + s * align_ / 4);
+        t.waves = uint32_t((height_ - 1 + half - 1) / half + 1);
+        std::vector<uint32_t> params(t.waves * align_ / 4);
+        for (uint32_t w = 0; w < t.waves; ++w) {
+            const uint32_t entry[] = {uint32_t(stride_), uint32_t(height_), w, 0};
+            std::copy(std::begin(entry), std::end(entry), params.begin() + w * align_ / 4);
         }
         wgpu::BufferDescriptor descriptor{.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
                                           .size = params.size() * 4};
@@ -332,14 +317,14 @@ private:
         wgpu::BindGroupDescriptor bind_group_descriptor{.layout = gpu->layout, .entryCount = std::size(entries_), .entries = entries_};
         t.bind_group = gpu->device.CreateBindGroup(&bind_group_descriptor);
         // Dispatch sizes cover the original width; workgroups beyond the current width do nothing
-        t.segments = uint32_t((stride_ + 2 * half - 1) / (2 * half));
+        t.diamonds = uint32_t((stride_ + half - 1) / (2 * half) + 1);
         return t;
     }
 
     int width_, height_, stride_;
     uint32_t align_ = 256;
     bool has_removed_ = false;
-    const Pipelines* tile_pipelines_ = nullptr;
+    const wgpu::ComputePipeline* tile_pipeline_ = nullptr;
     wgpu::Buffer pixels_, cost_, prev_, changed_, seam_, state_;
     Tiling full_, incremental_;
 };
