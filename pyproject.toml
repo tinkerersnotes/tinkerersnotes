@@ -9,7 +9,10 @@
 
 [dependency-groups]
 # Run-time dependencies of the *_seam_carver modules and cpp_seam_carver/shrink_animation.py
-seam-carver = ["Pillow>=12"]
+seam-carver = [
+    "Pillow>=12",
+    "wasmtime>=50",  # wasmtime_seam_carver: WebAssembly with exception handling
+]
 
 # Building the extension modules (build.sh, setup.py) and %%cython notebook cells.
 # setuptools also provides distutils, which Python 3.12 removed and Cython's %%cython magic needs.

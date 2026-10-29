@@ -1,6 +1,7 @@
 # Puts Emscripten EMSCRIPTEN_VERSION on PATH: the emcc already there if it is that version,
 # otherwise this repo's own emsdk in .emsdk/ (git-ignored), installed on first use: about 1 GB and
-# a few minutes, once. build.sh sources this; to use emcc in a shell, source it yourself:
+# a few minutes, once. build.sh and ../wasmtime_seam_carver/build.sh source this; to use emcc in a
+# shell, source it from the repo's root:
 #
 #   . wasm_seam_carver/emscripten.sh
 #
@@ -20,7 +21,14 @@ emscripten_setup() {
     if emscripten_is_pinned; then
         return 0  # already on PATH
     fi
-    _root=$(git rev-parse --show-toplevel 2>/dev/null) || _root=$(pwd)
+    # The repo's root: sourced from it or from one of its folders, like the build scripts do
+    if [ -f wasm_seam_carver/emscripten.sh ]; then
+        _root=$(pwd)
+    elif [ -f ../wasm_seam_carver/emscripten.sh ]; then
+        _root=$(cd .. && pwd)
+    else
+        _root=$(git rev-parse --show-toplevel 2>/dev/null) || _root=$(pwd)
+    fi
     _emsdk=${EMSDK_DIR:-$_root/.emsdk}
     if [ ! -x "$_emsdk/emsdk" ]; then
         echo "Installing Emscripten $EMSCRIPTEN_VERSION into $_emsdk (once)" >&2

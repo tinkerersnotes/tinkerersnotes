@@ -1,6 +1,6 @@
 # Seam carver: an optimization journey across Python, Cython and native code
 
-One algorithm, five Python-importable flavors, and a series of measured optimizations.
+One algorithm, six Python-importable flavors, and a series of measured optimizations.
 Every step was verified to produce pixel-identical output across all modules. Since step 12,
 incremental cost updates also produce exactly the same output as a full recompute.
 
@@ -33,10 +33,11 @@ incremental_cost_updates=True)`, `get_shrunk_image()` → RGB `PIL.Image`, `widt
 | `cpp_seam_carver` | `CppSeamCarver` | Cython wrapper (`cdef extern … cppclass`, `unique_ptr`, `nogil`) over the shared C++ core `seam_carver_core/seam_carver_impl.{hpp,cpp}`. The mesh is a single reserved `std::vector<MeshNode>`. |
 | `c_seam_carver` | `CSeamCarver` | Hand-written classic Python C API extension (static `PyTypeObject`, `tp_new`, RAII helpers) over the same C++ core. |
 | `ctypes_seam_carver` | `CtypesSeamCarver` | Pure Python `ctypes` wrapper over an `extern "C"` dynamic library (`libseam_carver.so`) built from the same C++ core. |
+| `wasmtime_seam_carver` | `WasmtimeSeamCarver` | The same C API and C++ core compiled by Emscripten into a standalone WebAssembly module (`seam_carver.wasm`), run by the Wasmtime runtime (`wasmtime` package). Each carver has its own sandboxed store and linear memory. |
 
-The three native flavors construct their object once, in `__cinit__`/`tp_new`/`__new__`. They
-reject concurrent use while the GIL is released, and their `__init__` is a no-op that still
-supports `super().__init__(image)`.
+The three native flavors and the WebAssembly one construct their object once, in
+`__cinit__`/`tp_new`/`__new__`. They reject concurrent use while the GIL is released, and their
+`__init__` is a no-op that still supports `super().__init__(image)`.
 
 ## Results at a glance
 
