@@ -2,6 +2,9 @@
 # Sets up this repo, safe to rerun: a Python virtual environment with the pinned dependencies
 # of pyproject.toml (constraints.txt), then builds the native seam carver modules.
 #
+# The WebAssembly page has its own build: wasm_seam_carver/build.sh, which installs the Emscripten
+# it needs on first use (wasm_seam_carver/emscripten.sh). Not done here: it takes about 1 GB.
+#
 # System requirements (Ubuntu packages):
 #   Python >= 3.12 with venv support       python3 python3-venv
 #   Python headers for extension modules   python3-dev

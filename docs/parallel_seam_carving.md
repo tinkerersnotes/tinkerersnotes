@@ -282,8 +282,13 @@ How it differs from the threads:
 ![Build pipeline](images/build.svg)
 
 *`wasm_seam_carver/build.sh` runs three `em++` commands and a Python inline step. The Pages
-workflow installs Emscripten 6.0.3, runs the script and publishes the page with its service
-worker.*
+workflow runs the script and publishes the page with its service worker.*
+
+To build the page yourself, run `wasm_seam_carver/build.sh` on macOS or Linux with git and python3.
+It needs Emscripten 6.0.3 and gets it through `wasm_seam_carver/emscripten.sh`: the `emcc` already
+on the `PATH` if it is that version, otherwise the repo's own copy in `.emsdk/`, installed on the
+first build (about 1 GB). The Pages workflow does the same and caches `.emsdk/`, so the version is
+pinned in one place. `. wasm_seam_carver/emscripten.sh` puts that `emcc` on a shell's `PATH`.
 
 | Module | Sources | Notable flags |
 |---|---|---|

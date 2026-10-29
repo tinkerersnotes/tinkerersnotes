@@ -31,18 +31,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The version the page is developed and tested with (see build.sh). Its built-in Emdawnwebgpu
-      # port downloads the Dawn release it pins while building the WebGPU engine in C++.
-      - name: Install Emscripten 6.0.3
-        run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
-          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.3
-          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.3
+      # build.sh installs the Emscripten pinned in wasm_seam_carver/emscripten.sh into .emsdk/, the
+      # same as on a developer's machine. Cached until that file changes, with Emscripten's own
+      # cache: its system libraries and the Dawn release the Emdawnwebgpu port downloads.
+      - uses: actions/cache@v4
+        with:
+          path: .emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('wasm_seam_carver/emscripten.sh') }}
 
       - name: Build the page
-        run: |
-          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
-          wasm_seam_carver/build.sh
+        run: wasm_seam_carver/build.sh
 
       # The page is self-contained, plus the service worker that makes it cross-origin isolated
       # for the multithreaded engine, which GitHub Pages' own headers can't

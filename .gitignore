@@ -37,3 +37,6 @@ tundra_resized_*.png
 
 # macOS Finder metadata
 .DS_Store
+
+# Emscripten for the WebAssembly page, installed on its first build (wasm_seam_carver/emscripten.sh)
+.emsdk/

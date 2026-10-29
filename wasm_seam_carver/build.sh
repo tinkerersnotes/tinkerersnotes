@@ -4,11 +4,12 @@
 # two WebGPU engines, in JavaScript and in C++. The page opens straight from disk, no web server
 # needed; only the multithreaded engine needs one (see isolation_service_worker.js).
 #
-# Needs Emscripten 6.0.3, as the Pages workflow installs it (other versions may work):
-#   git clone https://github.com/emscripten-core/emsdk.git && cd emsdk
-#   ./emsdk install 6.0.3 && ./emsdk activate 6.0.3 && source ./emsdk_env.sh
+# Needs Emscripten 6.0.3, which emscripten.sh puts on PATH: the emcc already there if it is that
+# version, otherwise the repo's own copy in .emsdk/, installed on the first build (about 1 GB, a
+# few minutes). The Pages workflow builds the page the same way. Needs git and python3.
 set -e
 cd "$(dirname "$0")"
+. ./emscripten.sh
 mkdir -p build
 
 # -fwasm-exceptions: the core's C++ exceptions as native WebAssembly exceptions, free until thrown
