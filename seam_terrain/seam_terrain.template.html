@@ -1,0 +1,575 @@
+<!doctype html>
+<!-- Template: build.sh inlines the JavaScript seam carver and the sample picture into seam_terrain.html -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seam Carving Terrain</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --panel: #f3f2ef;
+    --border: #dcdad5;
+    --text: #0b0b0b;
+    --text-secondary: #52514e;
+    --accent: #2a78d6;
+    --error: #b42318;
+    --sky-top: #c9dcf0;
+    --sky-bottom: #eef2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19;
+      --panel: #242423;
+      --border: #3a3a38;
+      --text: #f0efec;
+      --text-secondary: #c3c2b7;
+      --accent: #3987e5;
+      --error: #f97066;
+      --sky-top: #0e1622;
+      --sky-bottom: #26303c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .lede { color: var(--text-secondary); margin: 0 0 20px; max-width: 75ch; }
+  .controls {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .row > label[for], fieldset.row > legend { min-width: 7em; }
+  fieldset.row { border: 0; margin: 0; padding: 0; }
+  /* A legend can't be a flex item: floating it puts it in the row with the radio buttons */
+  fieldset.row > legend { float: left; padding: 0; margin-right: 12px; }
+  button, select {
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  input[type="range"] { flex: 1 1 240px; accent-color: var(--accent); }
+  #status { margin: 0; color: var(--text-secondary); min-height: 1.5em; }
+  #status.error { color: var(--error); }
+  #terrain {
+    display: block;
+    width: 100%;
+    height: min(72vh, 62vw);
+    min-height: 320px;
+    margin-top: 20px;
+    border-radius: 8px;
+    background: linear-gradient(var(--sky-top), var(--sky-bottom));
+    touch-action: none;  /* dragging turns the camera instead of scrolling the page */
+    cursor: grab;
+  }
+  #terrain.dragging { cursor: grabbing; }
+  .hint { color: var(--text-secondary); font-size: 0.9rem; margin: 6px 0 0; }
+  body.dragging main { outline: 3px dashed var(--accent); outline-offset: -8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Seam carving terrain</h1>
+  <p class="lede">Every pixel rises as high as the cost of the cheapest seam from the top row down to
+    it, computed by the JavaScript port of this repo's <code>SeamCarver</code>. Below the bottom row
+    the picture continues mirrored, so the bottom row becomes a ridge between two valleys. A seam only
+    climbs, so any path from one valley to the other reaches at least the ridge's height where it
+    crosses: the cheapest seam, in red, crosses at the ridge's lowest point, the mountain pass.</p>
+
+  <section class="controls">
+    <div class="row">
+      <label>Picture <input type="file" id="file" accept="image/*"></label>
+      <button type="button" id="sample">Use the sample picture</button>
+    </div>
+    <fieldset class="row">
+      <legend>Camera circles</legend>
+      <label><input type="radio" name="target" value="centre" checked> the ridge's centre</label>
+      <label><input type="radio" name="target" value="pass"> the pass</label>
+      <label><input type="checkbox" id="circling" checked> moving</label>
+    </fieldset>
+    <div class="row">
+      <label for="height-scale">Height</label>
+      <input type="range" id="height-scale" min="0" max="3" step="0.05" value="1">
+      <label>Mesh <select id="mesh-step">
+        <option value="1">every pixel</option>
+        <option value="2">every 2nd pixel</option>
+        <option value="4">every 4th pixel</option>
+      </select></label>
+      <label><input type="checkbox" id="show-seam" checked> Cheapest seam</label>
+    </div>
+    <p id="status" role="status">Loading…</p>
+  </section>
+
+  <canvas id="terrain"></canvas>
+  <p class="hint">Drag to turn the camera, scroll or pinch to zoom. Drop a picture anywhere on the page.</p>
+</main>
+
+<script>@@SEAM_CARVER_JS@@</script>
+<script>
+'use strict';
+
+const SAMPLE_IMAGE = '@@SAMPLE_IMAGE_DATA_URL@@';
+// Longer side of the picture at most: the mesh has a vertex per pixel, twice over with the mirror
+const MAX_SIDE = 1280;
+const ORBIT_SECONDS = 40;  // one turn of the camera
+const $ = (id) => document.getElementById(id);
+
+function setStatus(text, error = false) {
+  $('status').textContent = text;
+  $('status').classList.toggle('error', error);
+}
+
+// --- Terrain: costs from the seam carver ---------------------------------------------------------
+
+// Costs of the cheapest seams from the top row to every pixel, and the cheapest whole seam.
+// The core's full recompute, propagate_low_cost_paths(), fills carver.cost in picture order,
+// since no seam has been removed: node y * width + x is pixel (x, y).
+function computeTerrain(image) {
+  const { width, height, data } = image;
+  const rgb = new Uint8Array(width * height * 3);
+  for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+    rgb[j] = data[i];
+    rgb[j + 1] = data[i + 1];
+    rgb[j + 2] = data[i + 2];
+  }
+  const carver = new SeamCarver(rgb, width, height);
+  const bottomLeft = carver.propagate_low_cost_paths();
+  const costs = new Float32Array(width * height);
+  for (let node = 0; node < costs.length; node++) {
+    costs[node] = Math.max(carver.cost[node], 0);  // the top row keeps cost -1: no parent, nothing paid
+  }
+  // The seam, column per row, from its bottom end up along the parents
+  const seam = new Float32Array(height);
+  for (let node = carver.find_cheapest_seam(bottomLeft); node !== NONE; node = carver.prev[node]) {
+    seam[carver.y[node]] = node % width;
+  }
+  return { width, height, costs, seam };
+}
+
+// --- WebGL2 rendering ----------------------------------------------------------------------------
+
+// The mesh needs no vertex buffers: one triangle strip per pair of grid rows, drawn instanced, and
+// every vertex finds its pixel from gl_VertexID and gl_InstanceID. Mesh rows run from 0 at the top
+// edge through the ridge, picture row height - 1, to 2 * height - 2 at the mirrored edge.
+const VERTEX_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+uniform highp sampler2D u_costs;  // R32F, picture sized
+uniform ivec2 u_size;             // picture width and height
+uniform int u_step;               // mesh grid step, in pixels
+uniform float u_scale;            // world height per unit of cost
+uniform mat4 u_view_projection;
+out vec2 v_uv;
+out vec2 v_pixel;  // column and picture row
+out float v_row;   // mesh row
+out vec3 v_normal;
+
+int last_row() { return 2 * u_size.y - 2; }
+int picture_row(int row) { return row < u_size.y ? row : last_row() - row; }
+
+float height_at(int x, int row) {
+  x = clamp(x, 0, u_size.x - 1);
+  row = clamp(row, 0, last_row());
+  return texelFetch(u_costs, ivec2(x, picture_row(row)), 0).r * u_scale;
+}
+
+void main() {
+  int x = min((gl_VertexID / 2) * u_step, u_size.x - 1);
+  int row = min((gl_InstanceID + gl_VertexID % 2) * u_step, last_row());
+  float h = height_at(x, row);
+  // Surface y = h(x, z): its normal is (-dh/dx, 1, -dh/dz), here times 2 * step
+  float dx = height_at(x + u_step, row) - height_at(x - u_step, row);
+  float dz = height_at(x, row + u_step) - height_at(x, row - u_step);
+  v_normal = vec3(-dx, 2.0 * float(u_step), -dz);
+  int y = picture_row(row);
+  v_uv = (vec2(x, y) + 0.5) / vec2(u_size);
+  v_pixel = vec2(x, y);
+  v_row = float(row);
+  // World: x across the picture centred, y up, z along the rows with the ridge at 0
+  vec3 position = vec3(float(x) - 0.5 * float(u_size.x - 1), h, float(row - (u_size.y - 1)));
+  gl_Position = u_view_projection * vec4(position, 1.0);
+}`;
+
+const FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D u_picture;
+uniform highp sampler2D u_seam;  // R32F, height x 1: the cheapest seam's column in each picture row
+uniform ivec2 u_size;
+uniform vec3 u_light;            // towards the light
+uniform bool u_show_seam;
+in vec2 v_uv;
+in vec2 v_pixel;
+in float v_row;
+in vec3 v_normal;
+out vec4 color;
+
+// 1 on a line about two screen pixels wide where value == centre, fading to 0
+float line(float value, float centre) {
+  return 1.0 - smoothstep(1.0, 2.0, abs(value - centre) / max(fwidth(value), 1e-4));
+}
+
+void main() {
+  vec3 albedo = texture(u_picture, v_uv).rgb;
+  float diffuse = max(dot(normalize(v_normal), u_light), 0.0);
+  vec3 shaded = albedo * (0.45 + 0.7 * diffuse);
+  if (u_show_seam) {
+    // The seam's column between the two nearest picture rows
+    float y = clamp(v_pixel.y, 0.0, float(u_size.y - 1));
+    int y0 = int(y);
+    int y1 = min(y0 + 1, u_size.y - 1);
+    float seam_x = mix(texelFetch(u_seam, ivec2(y0, 0), 0).r, texelFetch(u_seam, ivec2(y1, 0), 0).r, fract(y));
+    shaded = mix(shaded, vec3(1.0, 0.16, 0.1), line(v_pixel.x, seam_x));
+  }
+  shaded = mix(shaded, vec3(1.0, 0.85, 0.3), 0.7 * line(v_row, float(u_size.y - 1)));  // the ridge
+  color = vec4(shaded, 1.0);
+}`;
+
+function compile(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(shader));
+  }
+  return shader;
+}
+
+function createProgram(gl) {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program));
+  }
+  const uniforms = {};
+  for (let i = 0; i < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); i++) {
+    const name = gl.getActiveUniform(program, i).name;
+    uniforms[name] = gl.getUniformLocation(program, name);
+  }
+  return { program, uniforms };
+}
+
+// Float textures can't be filtered without an extension, and texelFetch needs no filtering, but
+// a texture with a filter it doesn't support counts as incomplete and reads as zeros
+function floatTexture(gl, texture, width, height, values) {
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, values);
+}
+
+// Column-major 4x4 matrices, as WebGL takes them
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  const nf = 1 / (near - far);
+  return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
+}
+
+function lookAt(eye, target) {
+  const sub = (a, b) => a.map((v, i) => v - b[i]);
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const normalize = (a) => a.map((v) => v / Math.hypot(...a));
+  const z = normalize(sub(eye, target));
+  const x = normalize(cross([0, 1, 0], z));
+  const y = cross(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+          -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+}
+
+function multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let column = 0; column < 4; column++) {
+    for (let row = 0; row < 4; row++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) {
+        sum += a[k * 4 + row] * b[column * 4 + k];
+      }
+      out[column * 4 + row] = sum;
+    }
+  }
+  return out;
+}
+
+const canvas = $('terrain');
+const gl = canvas.getContext('webgl2', { antialias: true });
+let renderer = null;  // WebGL objects, once the context works
+let terrain = null;   // from computeTerrain(), with its picture on the GPU
+let source = null;    // the last picture's Blob, to reload it
+
+// Camera: circles its target at a fixed distance, from an angle above the horizon
+const camera = { azimuth: 0.6, elevation: 0.42, zoom: 1 };
+let dirty = true;  // something changed since the last frame
+
+function initRenderer() {
+  if (!gl) {
+    throw new Error('This browser has no WebGL2, which the terrain needs.');
+  }
+  const { program, uniforms } = createProgram(gl);
+  const anisotropy = gl.getExtension('EXT_texture_filter_anisotropic');
+  renderer = {
+    program,
+    uniforms,
+    vertexArray: gl.createVertexArray(),  // empty: the shader makes up its vertices
+    picture: gl.createTexture(),
+    costs: gl.createTexture(),
+    seam: gl.createTexture(),
+    anisotropy,
+  };
+  gl.enable(gl.DEPTH_TEST);
+}
+
+function uploadTerrain(image) {
+  const { picture, costs, seam, anisotropy } = renderer;
+  gl.bindTexture(gl.TEXTURE_2D, picture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (anisotropy) {
+    // The camera looks along the slopes at a grazing angle
+    const max = gl.getParameter(anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
+    gl.texParameterf(gl.TEXTURE_2D, anisotropy.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, max));
+  }
+  floatTexture(gl, costs, terrain.width, terrain.height, terrain.costs);
+  floatTexture(gl, seam, terrain.height, 1, terrain.seam);
+}
+
+function resizeCanvas() {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.round(canvas.clientWidth * ratio);
+  const height = Math.round(canvas.clientHeight * ratio);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+    dirty = true;
+  }
+}
+
+function render() {
+  resizeCanvas();
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 0);  // transparent: the canvas's sky gradient shows through
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!terrain) {
+    return;
+  }
+  const { width, height, costs, seam, maxCost } = terrain;
+  // Default height: the highest peak at 35% of the picture's width, times the slider
+  const scale = maxCost > 0 ? Number($('height-scale').value) * 0.35 * width / maxCost : 0;
+  const targetX = document.querySelector('input[name="target"]:checked').value === 'pass'
+    ? seam[height - 1] : Math.floor((width - 1) / 2);
+  const target = [targetX - (width - 1) / 2, costs[(height - 1) * width + targetX] * scale, 0];
+  const extent = Math.max(width, 2 * height - 1);
+  const distance = 0.8 * extent * camera.zoom;
+  const eye = [
+    target[0] + distance * Math.cos(camera.elevation) * Math.sin(camera.azimuth),
+    target[1] + distance * Math.sin(camera.elevation),
+    target[2] + distance * Math.cos(camera.elevation) * Math.cos(camera.azimuth),
+  ];
+  const projection = perspective(Math.PI / 4, canvas.width / canvas.height, distance / 50, distance + 3 * extent);
+  const step = Number($('mesh-step').value);
+  const columns = Math.ceil((width - 1) / step) + 1;
+  const gridRows = Math.ceil((2 * height - 2) / step) + 1;
+
+  const { program, uniforms: u } = renderer;
+  gl.useProgram(program);
+  gl.bindVertexArray(renderer.vertexArray);
+  for (const [unit, texture, name] of [[0, renderer.costs, 'u_costs'], [1, renderer.picture, 'u_picture'],
+                                       [2, renderer.seam, 'u_seam']]) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(u[name], unit);
+  }
+  gl.uniform2i(u.u_size, width, height);
+  gl.uniform1i(u.u_step, step);
+  gl.uniform1f(u.u_scale, scale);
+  gl.uniformMatrix4fv(u.u_view_projection, false, multiply(projection, lookAt(eye, target)));
+  const light = [-0.45, 0.75, 0.5];
+  gl.uniform3fv(u.u_light, light.map((v) => v / Math.hypot(...light)));
+  gl.uniform1i(u.u_show_seam, $('show-seam').checked ? 1 : 0);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * columns, gridRows - 1);
+}
+
+// --- Animation and input -------------------------------------------------------------------------
+
+let dragging = null;  // the pointers on the canvas, by id, while dragging or pinching
+let lastTime = null;
+
+function frame(time) {
+  const elapsed = lastTime === null ? 0 : Math.min(time - lastTime, 100) / 1000;
+  lastTime = time;
+  if ($('circling').checked && !dragging) {
+    camera.azimuth += elapsed * 2 * Math.PI / ORBIT_SECONDS;
+    dirty = true;
+  }
+  if (dirty && renderer) {
+    dirty = false;
+    render();
+  }
+  requestAnimationFrame(frame);
+}
+
+canvas.addEventListener('pointerdown', (event) => {
+  dragging ??= new Map();
+  dragging.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  canvas.setPointerCapture(event.pointerId);
+  canvas.classList.add('dragging');
+});
+canvas.addEventListener('pointermove', (event) => {
+  const last = dragging?.get(event.pointerId);
+  if (!last) {
+    return;
+  }
+  if (dragging.size === 1) {
+    camera.azimuth -= (event.clientX - last.x) * 0.006;
+    camera.elevation = Math.min(Math.max(camera.elevation + (event.clientY - last.y) * 0.004, 0.05), 1.5);
+  } else {
+    // Pinch: zoom by how much the distance between two fingers changed
+    const other = [...dragging].find(([id]) => id !== event.pointerId)[1];
+    const before = Math.hypot(last.x - other.x, last.y - other.y);
+    const after = Math.hypot(event.clientX - other.x, event.clientY - other.y);
+    zoomBy(before / Math.max(after, 1));
+  }
+  dragging.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  dirty = true;
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  canvas.addEventListener(type, (event) => {
+    dragging?.delete(event.pointerId);
+    if (!dragging?.size) {
+      dragging = null;
+      canvas.classList.remove('dragging');
+    }
+  });
+}
+
+function zoomBy(factor) {
+  camera.zoom = Math.min(Math.max(camera.zoom * factor, 0.15), 3);
+  dirty = true;
+}
+canvas.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  zoomBy(Math.exp(event.deltaY * 0.001));
+}, { passive: false });
+
+for (const id of ['height-scale', 'mesh-step', 'show-seam']) {
+  $(id).addEventListener('input', () => { dirty = true; });
+}
+for (const radio of document.querySelectorAll('input[name="target"]')) {
+  radio.addEventListener('change', () => { dirty = true; });
+}
+new ResizeObserver(() => { dirty = true; }).observe(canvas);
+
+// --- Pictures ------------------------------------------------------------------------------------
+
+async function loadPicture(blob) {
+  source = blob;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+  } catch {
+    setStatus('Could not read that file as a picture.', true);
+    return;
+  }
+  const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(2, Math.round(bitmap.width * scale));
+  const height = Math.max(2, Math.round(bitmap.height * scale));
+  const context = Object.assign(document.createElement('canvas'), { width, height })
+    .getContext('2d', { willReadFrequently: true });
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+  const image = context.getImageData(0, 0, width, height);
+
+  setStatus('Computing the costs…');
+  await new Promise(requestAnimationFrame);  // let the status show first
+  const start = performance.now();
+  terrain = computeTerrain(image);
+  const elapsed = performance.now() - start;
+  terrain.maxCost = terrain.costs.reduce((a, b) => Math.max(a, b), 0);
+  uploadTerrain(image);
+
+  const ridge = terrain.costs.subarray((height - 1) * width);
+  const passX = terrain.seam[height - 1];
+  const centreX = Math.floor((width - 1) / 2);
+  const round = (value) => Math.round(value).toLocaleString('en-US');
+  setStatus(`${width} × ${height} px, costs in ${Math.round(elapsed)} ms. Ridge from ${round(ridge[passX])}` +
+            ` (the pass, x = ${passX}) to ${round(Math.max(...ridge))}; its centre ${round(ridge[centreX])},` +
+            ` the highest peak ${round(terrain.maxCost)}.`);
+  dirty = true;
+}
+
+$('file').addEventListener('change', (event) => {
+  if (event.target.files.length) {
+    loadPicture(event.target.files[0]);
+  }
+});
+$('sample').addEventListener('click', async () => loadPicture(await (await fetch(SAMPLE_IMAGE)).blob()));
+
+// Drop a picture anywhere on the page
+document.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  document.body.classList.add('dragging');
+});
+document.addEventListener('dragleave', (event) => {
+  if (!event.relatedTarget) {
+    document.body.classList.remove('dragging');
+  }
+});
+document.addEventListener('drop', (event) => {
+  event.preventDefault();
+  document.body.classList.remove('dragging');
+  const file = [...event.dataTransfer.files].find((f) => f.type.startsWith('image/'));
+  if (file) {
+    loadPicture(file);
+  }
+});
+
+// Phones get a lighter mesh, and nobody who asked for less motion gets a moving camera
+if (matchMedia('(pointer: coarse)').matches) {
+  $('mesh-step').value = '2';
+}
+if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  $('circling').checked = false;
+}
+
+(async () => {
+  try {
+    initRenderer();
+  } catch (error) {
+    setStatus(error.message, true);
+    return;
+  }
+  canvas.addEventListener('webglcontextrestored', () => {
+    initRenderer();
+    if (terrain && source) {
+      loadPicture(source);
+    }
+  });
+  canvas.addEventListener('webglcontextlost', (event) => event.preventDefault());
+  requestAnimationFrame(frame);
+  await loadPicture(await (await fetch(SAMPLE_IMAGE)).blob());
+})();
+</script>
+</body>
+</html>
