@@ -66,7 +66,9 @@
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
   input[type="range"] { flex: 1 1 240px; accent-color: var(--accent); }
-  #status { margin: 0; color: var(--text-secondary); min-height: 1.5em; }
+  output { display: inline-block; min-width: 2.5em; text-align: right; font-variant-numeric: tabular-nums; }
+  .unit { color: var(--text-secondary); }
+  #status { margin: 8px 0 0; color: var(--text-secondary); min-height: 1.5em; }
   #status.error { color: var(--error); }
   #terrain {
     display: block;
@@ -91,7 +93,12 @@
     it, computed by the JavaScript port of this repo's <code>SeamCarver</code>. Below the bottom row
     the picture continues mirrored, so the bottom row becomes a ridge between two valleys. A seam only
     climbs, so any path from one valley to the other reaches at least the ridge's height where it
-    crosses: the cheapest seam, in red, crosses at the ridge's lowest point, the mountain pass.</p>
+    crosses: the cheapest seam, in red, crosses at the ridge's lowest point, the mountain pass.
+    Carve to remove seams one by one: each removes the pass, the terrain settles and the next
+    cheapest seam finds another way over the ridge. The height shrinks by turning the picture a
+    quarter turn and removing the same seams: that terrain rises from left to right, with the ridge
+    on the right. Whichever way you carve comes last: carving the width after the height carves the
+    height again first, then the width on top.</p>
 
   <section class="controls">
     <div class="row">
@@ -114,10 +121,31 @@
       </select></label>
       <label><input type="checkbox" id="show-seam" checked> Cheapest seam</label>
     </div>
-    <p id="status" role="status">Loading…</p>
+    <div class="row">
+      <label for="width-seams">Shrink width by</label>
+      <input type="range" id="width-seams" min="0" max="0" value="0" disabled>
+      <span><output id="width-seams-value" for="width-seams">0</output> <span class="unit">px</span></span>
+      <button type="button" id="width-play" disabled>Carve</button>
+    </div>
+    <div class="row">
+      <label for="height-seams">Shrink height by</label>
+      <input type="range" id="height-seams" min="0" max="0" value="0" disabled>
+      <span><output id="height-seams-value" for="height-seams">0</output> <span class="unit">px</span></span>
+      <button type="button" id="height-play" disabled>Carve</button>
+    </div>
+    <div class="row">
+      <button type="button" id="reset" disabled>Back to the original</button>
+      <label>Speed <select id="speed">
+        <option value="10">10</option>
+        <option value="30" selected>30</option>
+        <option value="100">100</option>
+      </select> seams per second</label>
+    </div>
   </section>
 
   <canvas id="terrain"></canvas>
+  <!-- Under the scene: the status wraps to more or fewer lines as the numbers change -->
+  <p id="status" role="status">Loading…</p>
   <p class="hint">Drag to turn the camera, scroll or pinch to zoom. Drop a picture anywhere on the page.</p>
 </main>
 
@@ -138,10 +166,80 @@ function setStatus(text, error = false) {
 
 // --- Terrain: costs from the seam carver ---------------------------------------------------------
 
-// Costs of the cheapest seams from the top row to every pixel, and the cheapest whole seam.
-// The core's full recompute, propagate_low_cost_paths(), fills carver.cost in picture order,
-// since no seam has been removed: node y * width + x is pixel (x, y).
-function computeTerrain(image) {
+// Brings the carver's costs up to date for its current picture, the way remove_vertical_seam()
+// starts: in full before the first seam, then incrementally from the last removed seam. Returns
+// the bottom row's leftmost node. The next remove_vertical_seam() computes the same costs again:
+// in full, or incrementally finding every queued node's children evaluated in this epoch already,
+// so it changes nothing and removes the seam shown.
+function updateCosts(carver) {
+  return carver.has_update_heads ? carver.update_cost_incrementally() : carver.propagate_low_cost_paths();
+}
+
+let columnOf = new Int32Array(0);  // scratch for extractTerrain(): each node's column in the current picture
+
+// The current picture, the costs of the cheapest seams from its top row to every pixel, and the
+// cheapest whole seam, read from the carver's mesh: rows of nodes linked left to right.
+function extractTerrain(carver) {
+  const bottomLeft = updateCosts(carver);
+  const { width, height } = carver;
+  const costs = new Float32Array(width * height);
+  const picture = new Uint8Array(width * height * 4);
+  if (columnOf.length < carver.cost.length) {
+    columnOf = new Int32Array(carver.cost.length);
+  }
+  let i = 0;
+  for (let row = carver.top_left; row !== NONE; row = carver.down[row]) {
+    for (let node = row, x = 0; node !== NONE; node = carver.right[node], x++, i++) {
+      costs[i] = Math.max(carver.cost[node], 0);  // the top row keeps cost -1: no parent, nothing paid
+      picture[4 * i] = carver.r[node];
+      picture[4 * i + 1] = carver.g[node];
+      picture[4 * i + 2] = carver.b[node];
+      picture[4 * i + 3] = 255;
+      columnOf[node] = x;
+    }
+  }
+  // The seam, column per row, from its bottom end up along the parents
+  const seam = new Float32Array(height);
+  for (let node = carver.find_cheapest_seam(bottomLeft); node !== NONE; node = carver.prev[node]) {
+    seam[carver.y[node]] = columnOf[node];
+  }
+  return { width, height, costs, seam, picture };
+}
+
+// Quarter turns of row-major RGB pictures, width x height in, height x width out
+function rotateClockwise(rgb, width, height) {
+  const out = new Uint8Array(rgb.length);
+  for (let y = 0, i = 0; y < height; y++) {
+    for (let x = 0; x < width; x++, i += 3) {
+      const o = 3 * (x * height + height - 1 - y);
+      out[o] = rgb[i];
+      out[o + 1] = rgb[i + 1];
+      out[o + 2] = rgb[i + 2];
+    }
+  }
+  return out;
+}
+
+function rotateCounterclockwise(rgb, width, height) {
+  const out = new Uint8Array(rgb.length);
+  for (let y = 0, i = 0; y < height; y++) {
+    for (let x = 0; x < width; x++, i += 3) {
+      const o = 3 * ((width - 1 - x) * height + y);
+      out[o] = rgb[i];
+      out[o + 1] = rgb[i + 1];
+      out[o + 2] = rgb[i + 2];
+    }
+  }
+  return out;
+}
+
+// The picture being carved, as two stages, one per axis: the first carves the original picture,
+// the second the first one's result. The width stage removes vertical seams from the upright
+// picture; the height stage removes them from the picture turned clockwise, horizontal seams of
+// the upright picture. Each stage has its carver, how many seams it removed and how many it should.
+let carving = null;
+
+function startCarving(image) {
   const { width, height, data } = image;
   const rgb = new Uint8Array(width * height * 3);
   for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
@@ -149,18 +247,160 @@ function computeTerrain(image) {
     rgb[j + 1] = data[i + 1];
     rgb[j + 2] = data[i + 2];
   }
-  const carver = new SeamCarver(rgb, width, height);
-  const bottomLeft = carver.propagate_low_cost_paths();
-  const costs = new Float32Array(width * height);
-  for (let node = 0; node < costs.length; node++) {
-    costs[node] = Math.max(carver.cost[node], 0);  // the top row keeps cost -1: no parent, nothing paid
+  // target: seams to remove, fractional while carving at a speed
+  const stage = (axis) => ({ axis, carver: null, removed: 0, target: 0 });
+  carving = {
+    rgb,
+    width,
+    height,
+    stages: [stage('width'), stage('height')],
+    playing: null,  // the axis being carved at a speed
+    maxCost: 0,     // of the original picture: the height scale stays put while carving
+  };
+  carving.stages[0].carver = createCarver(0);
+}
+
+const stageOf = (axis) => carving.stages.find((stage) => stage.axis === axis);
+// The mesh needs two columns, and two rows
+const maxSeams = (axis) => (axis === 'width' ? carving.width : carving.height) - 2;
+
+// A carver for the stage's input, turned for its axis
+function createCarver(index) {
+  const stage = carving.stages[index];
+  let rgb = carving.rgb;
+  let width = carving.width;
+  let height = carving.height;
+  if (index === 1) {
+    const first = carving.stages[0].carver;
+    rgb = first.shrunk_rgb();
+    width = first.width;
+    height = first.height;
+    if (carving.stages[0].axis === 'height') {
+      rgb = rotateCounterclockwise(rgb, width, height);  // back upright
+      [width, height] = [height, width];
+    }
   }
-  // The seam, column per row, from its bottom end up along the parents
-  const seam = new Float32Array(height);
-  for (let node = carver.find_cheapest_seam(bottomLeft); node !== NONE; node = carver.prev[node]) {
-    seam[carver.y[node]] = node % width;
+  if (stage.axis === 'height') {
+    rgb = rotateClockwise(rgb, width, height);
+    [width, height] = [height, width];
   }
-  return { width, height, costs, seam };
+  return new SeamCarver(rgb, width, height);
+}
+
+// Carving an axis puts it last, so it carves on top of the other one, which stays as it is.
+// If it was first and the other one has seams to remove, both start over in the new order.
+function makeLast(axis) {
+  const [first, second] = carving.stages;
+  if (first.axis === axis && second.target > 0) {
+    carving.stages.reverse();
+    for (const stage of carving.stages) {
+      stage.carver = null;
+      stage.removed = 0;
+    }
+  }
+}
+
+// Removes the stage's seams towards its target until the deadline. Going back means starting
+// again from the stage's input. Returns whether the stage's result changed.
+function seek(index, deadline) {
+  const stage = carving.stages[index];
+  const goal = Math.floor(stage.target);
+  let changed = false;
+  if (!stage.carver || goal < stage.removed) {
+    stage.carver = createCarver(index);
+    stage.removed = 0;
+    changed = true;
+  }
+  while (stage.removed < goal && performance.now() < deadline) {
+    stage.carver.shrink_horizontally(1, true);
+    stage.removed++;
+    changed = true;
+  }
+  return changed;
+}
+
+// Carves towards the targets for at most a few milliseconds, so the page stays smooth, then reads
+// the terrain of the stage carved last. Returns whether the terrain changed.
+function advanceCarving(elapsed) {
+  if (!carving) {
+    return false;
+  }
+  const speed = Number($('speed').value);
+  if (carving.playing) {
+    // Never further ahead than a quarter of a second of carving, should the carver fall behind
+    const stage = stageOf(carving.playing);
+    const max = maxSeams(stage.axis);
+    stage.target = Math.min(stage.target + elapsed * speed, stage.removed + speed / 4, max);
+    if (stage.target >= max) {
+      setPlaying(null);
+    }
+  }
+  // Nothing to carve: back to the width first, the terrain of the vertical seams
+  if (carving.stages[0].axis === 'height' && carving.stages.every((stage) => stage.target === 0)) {
+    carving.stages.reverse();
+    for (const stage of carving.stages) {
+      stage.carver = null;
+      stage.removed = 0;
+    }
+  }
+
+  const deadline = performance.now() + 12;
+  const [first, second] = carving.stages;
+  let changed = seek(0, deadline);
+  if (changed) {
+    second.carver = null;  // its input changed
+    second.removed = 0;
+  }
+  if (second.target === 0) {
+    changed ||= second.carver !== null;
+    second.carver = null;
+    second.removed = 0;
+  } else if (first.removed === Math.floor(first.target)) {
+    changed = seek(1, deadline) || changed;
+  }
+  if (!changed) {
+    return false;
+  }
+
+  const shown = second.carver ? second : first;
+  const axis = terrain?.axis;
+  terrain = extractTerrain(shown.carver);
+  terrain.axis = shown.axis;
+  if (terrain.axis !== axis) {
+    camera.target = null;  // another terrain: no gliding over from the old one
+  }
+  uploadTerrain();
+  for (const stage of carving.stages) {
+    if (carving.playing === stage.axis) {
+      $(`${stage.axis}-seams`).value = stage.removed;
+    }
+    $(`${stage.axis}-seams-value`).textContent = stage.removed;
+  }
+  showTerrainStatus();
+  return true;
+}
+
+function setPlaying(axis) {
+  carving.playing = axis;
+  for (const name of ['width', 'height']) {
+    $(`${name}-play`).textContent = axis === name ? 'Pause' : 'Carve';
+  }
+}
+
+// The terrain of the height stage is that of the picture turned clockwise: its ridge is the
+// upright picture's right edge, and its columns the upright rows from the bottom up
+function showTerrainStatus(elapsed) {
+  const { width, height, costs, seam, axis } = terrain;
+  const turned = axis === 'height';
+  const ridge = costs.subarray((height - 1) * width);
+  const passX = seam[height - 1];
+  const round = (value) => Math.round(value).toLocaleString('en-US');
+  const timing = elapsed === undefined ? '' : `, costs in ${Math.round(elapsed)} ms`;
+  setStatus(`${turned ? height : width} × ${turned ? width : height} px${timing}, terrain of the ` +
+            `${turned ? 'horizontal seams, mirrored on the right' : 'vertical seams, mirrored below'}. ` +
+            `Ridge from ${round(ridge[passX])} (the pass, ${turned ? `y = ${width - 1 - passX}` : `x = ${passX}`})` +
+            ` to ${round(Math.max(...ridge))}; its centre ${round(ridge[Math.floor((width - 1) / 2)])},` +
+            ` the highest peak ${round(costs.reduce((a, b) => Math.max(a, b), 0))}.`);
 }
 
 // --- WebGL2 rendering ----------------------------------------------------------------------------
@@ -313,11 +553,12 @@ function multiply(a, b) {
 const canvas = $('terrain');
 const gl = canvas.getContext('webgl2', { antialias: true });
 let renderer = null;  // WebGL objects, once the context works
-let terrain = null;   // from computeTerrain(), with its picture on the GPU
+let terrain = null;   // from extractTerrain(), on the GPU too
 let source = null;    // the last picture's Blob, to reload it
 
-// Camera: circles its target at a fixed distance, from an angle above the horizon
-const camera = { azimuth: 0.6, elevation: 0.42, zoom: 1 };
+// Camera: circles its target at a fixed distance, from an angle above the horizon. The target
+// glides to where it should be, since the pass jumps and the ridge sinks while carving.
+const camera = { azimuth: 0.6, elevation: 0.42, zoom: 1, target: null };
 let dirty = true;  // something changed since the last frame
 
 function initRenderer() {
@@ -338,10 +579,11 @@ function initRenderer() {
   gl.enable(gl.DEPTH_TEST);
 }
 
-function uploadTerrain(image) {
+function uploadTerrain() {
   const { picture, costs, seam, anisotropy } = renderer;
   gl.bindTexture(gl.TEXTURE_2D, picture);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, terrain.width, terrain.height, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+                terrain.picture);
   gl.generateMipmap(gl.TEXTURE_2D);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -366,26 +608,43 @@ function resizeCanvas() {
   }
 }
 
-function render() {
+// Draws a frame. Returns whether the camera's target is still on its way.
+function render(elapsed) {
   resizeCanvas();
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0, 0, 0, 0);  // transparent: the canvas's sky gradient shows through
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (!terrain) {
-    return;
+    return false;
   }
-  const { width, height, costs, seam, maxCost } = terrain;
-  // Default height: the highest peak at 35% of the picture's width, times the slider
-  const scale = maxCost > 0 ? Number($('height-scale').value) * 0.35 * width / maxCost : 0;
+  const { width, height, costs, seam } = terrain;
+  // Default height: the original picture's highest peak at 35% of its width, times the slider
+  const { maxCost } = carving;
+  const scale = maxCost > 0 ? Number($('height-scale').value) * 0.35 * carving.width / maxCost : 0;
   const targetX = document.querySelector('input[name="target"]:checked').value === 'pass'
     ? seam[height - 1] : Math.floor((width - 1) / 2);
-  const target = [targetX - (width - 1) / 2, costs[(height - 1) * width + targetX] * scale, 0];
-  const extent = Math.max(width, 2 * height - 1);
+  const goal = [targetX - (width - 1) / 2, costs[(height - 1) * width + targetX] * scale, 0];
+  // The original picture's size: the camera keeps its distance while the terrain narrows
+  const turned = terrain.axis === 'height';
+  const extent = Math.max(turned ? carving.height : carving.width, 2 * height - 1);
+  let gliding = false;
+  if (camera.target) {
+    const blend = 1 - Math.exp(-4 * elapsed);  // about a quarter of a second to settle
+    camera.target = camera.target.map((value, i) => value + (goal[i] - value) * blend);
+    gliding = Math.hypot(...camera.target.map((value, i) => value - goal[i])) > extent * 1e-4;
+  }
+  if (!gliding) {
+    camera.target = goal;
+  }
+  const target = camera.target;
   const distance = 0.8 * extent * camera.zoom;
+  // The turned terrain lies a quarter turn round from the upright one: the camera goes round by as
+  // much, so the picture keeps facing the same way
+  const azimuth = camera.azimuth - (turned ? Math.PI / 2 : 0);
   const eye = [
-    target[0] + distance * Math.cos(camera.elevation) * Math.sin(camera.azimuth),
+    target[0] + distance * Math.cos(camera.elevation) * Math.sin(azimuth),
     target[1] + distance * Math.sin(camera.elevation),
-    target[2] + distance * Math.cos(camera.elevation) * Math.cos(camera.azimuth),
+    target[2] + distance * Math.cos(camera.elevation) * Math.cos(azimuth),
   ];
   const projection = perspective(Math.PI / 4, canvas.width / canvas.height, distance / 50, distance + 3 * extent);
   const step = Number($('mesh-step').value);
@@ -409,6 +668,7 @@ function render() {
   gl.uniform3fv(u.u_light, light.map((v) => v / Math.hypot(...light)));
   gl.uniform1i(u.u_show_seam, $('show-seam').checked ? 1 : 0);
   gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * columns, gridRows - 1);
+  return gliding;
 }
 
 // --- Animation and input -------------------------------------------------------------------------
@@ -423,9 +683,11 @@ function frame(time) {
     camera.azimuth += elapsed * 2 * Math.PI / ORBIT_SECONDS;
     dirty = true;
   }
+  if (renderer && advanceCarving(elapsed)) {
+    dirty = true;
+  }
   if (dirty && renderer) {
-    dirty = false;
-    render();
+    dirty = render(elapsed);
   }
   requestAnimationFrame(frame);
 }
@@ -504,20 +766,56 @@ async function loadPicture(blob) {
   setStatus('Computing the costs…');
   await new Promise(requestAnimationFrame);  // let the status show first
   const start = performance.now();
-  terrain = computeTerrain(image);
+  startCarving(image);
+  terrain = extractTerrain(carving.stages[0].carver);
+  terrain.axis = 'width';
   const elapsed = performance.now() - start;
-  terrain.maxCost = terrain.costs.reduce((a, b) => Math.max(a, b), 0);
-  uploadTerrain(image);
+  carving.maxCost = terrain.costs.reduce((a, b) => Math.max(a, b), 0);
+  uploadTerrain();
+  showTerrainStatus(elapsed);
 
-  const ridge = terrain.costs.subarray((height - 1) * width);
-  const passX = terrain.seam[height - 1];
-  const centreX = Math.floor((width - 1) / 2);
-  const round = (value) => Math.round(value).toLocaleString('en-US');
-  setStatus(`${width} × ${height} px, costs in ${Math.round(elapsed)} ms. Ridge from ${round(ridge[passX])}` +
-            ` (the pass, x = ${passX}) to ${round(Math.max(...ridge))}; its centre ${round(ridge[centreX])},` +
-            ` the highest peak ${round(terrain.maxCost)}.`);
+  setPlaying(null);
+  for (const axis of ['width', 'height']) {
+    $(`${axis}-seams`).max = maxSeams(axis);
+    $(`${axis}-seams`).value = 0;
+    $(`${axis}-seams-value`).textContent = 0;
+    for (const id of [`${axis}-seams`, `${axis}-play`]) {
+      $(id).disabled = false;
+    }
+  }
+  $('reset').disabled = false;
+  camera.target = null;  // a new picture: no gliding from the old one
   dirty = true;
 }
+
+// Carving: a button carves its axis at the chosen speed down to the smallest terrain, a slider
+// goes straight to a number of seams, either way
+for (const axis of ['width', 'height']) {
+  $(`${axis}-play`).addEventListener('click', () => {
+    if (carving.playing === axis) {
+      setPlaying(null);
+      return;
+    }
+    makeLast(axis);
+    const stage = stageOf(axis);
+    if (stage.target >= maxSeams(axis)) {
+      stage.target = 0;  // carved all the way: start over
+    }
+    setPlaying(axis);
+  });
+  $(`${axis}-seams`).addEventListener('input', () => {
+    setPlaying(null);
+    makeLast(axis);
+    stageOf(axis).target = Number($(`${axis}-seams`).value);
+  });
+}
+$('reset').addEventListener('click', () => {
+  setPlaying(null);
+  for (const stage of carving.stages) {
+    stage.target = 0;
+    $(`${stage.axis}-seams`).value = 0;
+  }
+});
 
 $('file').addEventListener('change', (event) => {
   if (event.target.files.length) {
