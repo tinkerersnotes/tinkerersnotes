@@ -112,8 +112,8 @@
       <label><input type="checkbox" id="circling" checked> moving</label>
     </fieldset>
     <div class="row">
-      <label for="height-scale">Height</label>
-      <input type="range" id="height-scale" min="0" max="3" step="0.05" value="1">
+      <label for="relief-scale">Relief scale</label>
+      <input type="range" id="relief-scale" min="0" max="3" step="0.05" value="1">
       <label>Mesh <select id="mesh-step">
         <option value="1">every pixel</option>
         <option value="2">every 2nd pixel</option>
@@ -618,9 +618,9 @@ function render(elapsed) {
     return false;
   }
   const { width, height, costs, seam } = terrain;
-  // Default height: the original picture's highest peak at 35% of its width, times the slider
+  // Default relief: the original picture's highest peak at 35% of its width, times the slider
   const { maxCost } = carving;
-  const scale = maxCost > 0 ? Number($('height-scale').value) * 0.35 * carving.width / maxCost : 0;
+  const scale = maxCost > 0 ? Number($('relief-scale').value) * 0.35 * carving.width / maxCost : 0;
   const targetX = document.querySelector('input[name="target"]:checked').value === 'pass'
     ? seam[height - 1] : Math.floor((width - 1) / 2);
   const goal = [targetX - (width - 1) / 2, costs[(height - 1) * width + targetX] * scale, 0];
@@ -735,7 +735,7 @@ canvas.addEventListener('wheel', (event) => {
   zoomBy(Math.exp(event.deltaY * 0.001));
 }, { passive: false });
 
-for (const id of ['height-scale', 'mesh-step', 'show-seam']) {
+for (const id of ['relief-scale', 'mesh-step', 'show-seam']) {
   $(id).addEventListener('input', () => { dirty = true; });
 }
 for (const radio of document.querySelectorAll('input[name="target"]')) {
