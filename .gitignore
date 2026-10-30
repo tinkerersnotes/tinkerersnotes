@@ -25,6 +25,8 @@ cpp_seam_carver/cpp_seam_carver.html
 # Standalone page built by wasm_seam_carver/build.sh from seam_carver.template.html,
 # with the WebAssembly module embedded
 wasm_seam_carver/seam_carver.html
+# Built by seam_terrain/build.sh from seam_terrain.template.html
+seam_terrain/seam_terrain.html
 
 # Jupyter autosave copies
 .ipynb_checkpoints/

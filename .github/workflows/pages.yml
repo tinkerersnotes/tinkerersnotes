@@ -1,14 +1,17 @@
-# Builds the standalone seam carver page (wasm_seam_carver/build.sh) and publishes it on
-# GitHub Pages, at https://<owner>.github.io/<repo>/.
+# Builds the standalone seam carving pages and publishes them on GitHub Pages, at
+# https://<owner>.github.io/<repo>/: pages/index.html, which links to the two demos,
+# seam_carver.html (wasm_seam_carver/build.sh) and seam_terrain.html (seam_terrain/build.sh).
 #
 # One-time setup in the repository: Settings > Pages > Build and deployment > Source: GitHub Actions.
-name: Publish seam carver page
+name: Publish seam carver pages
 
 on:
   push:
     branches: [main]
     paths:
+      - 'pages/**'
       - 'wasm_seam_carver/**'
+      - 'seam_terrain/**'
       - 'seam_carver_core/**'
       - 'parallel_seam_carver/**'
       - 'tundra_1280x958.jpeg'
@@ -39,15 +42,19 @@ jobs:
           path: .emsdk
           key: emsdk-${{ runner.os }}-${{ hashFiles('wasm_seam_carver/emscripten.sh') }}
 
-      - name: Build the page
-        run: wasm_seam_carver/build.sh
+      - name: Build the pages
+        run: |
+          wasm_seam_carver/build.sh
+          seam_terrain/build.sh
 
-      # The page is self-contained, plus the service worker that makes it cross-origin isolated
-      # for the multithreaded engine, which GitHub Pages' own headers can't
+      # The pages are self-contained, plus the service worker that makes the seam carver page
+      # cross-origin isolated for its multithreaded engine, which GitHub Pages' own headers can't
       - name: Collect the site
         run: |
           mkdir site
-          cp wasm_seam_carver/seam_carver.html site/index.html
+          cp pages/index.html site/
+          cp wasm_seam_carver/seam_carver.html site/
+          cp seam_terrain/seam_terrain.html site/
           cp wasm_seam_carver/isolation_service_worker.js site/
 
       - uses: actions/upload-pages-artifact@v3
