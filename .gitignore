@@ -34,7 +34,9 @@ seam_terrain/seam_terrain.html
 # Images written by seam_carver.ipynb runs
 tundra_resized_*.png
 
-# C source written by python_mmap.ipynb runs (the library it builds is covered by *.so)
+# Files written by python_mmap.ipynb runs: its sample data and the C source (the library it
+# builds is covered by *.so and *.dylib)
+sample_file.bin
 hello_mmap.c
 
 # Local virtual environment (init.sh)
