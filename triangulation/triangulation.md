@@ -32,3 +32,29 @@ Same logic applies to find the other edge bridging two outer hull.
 
 6) Observation 5: outer hull of triangulation minimizing sum of angles is a convex hull. So, two edges found using observation 4 must be present in triangulation.
 What if we can start with bridging edge (containing 2 points from two sides). Keep adding candidate points to triangulation and checking whether edge flip is need. When two triangles share an edge, two circumcircles around of each of these two triangles should not contain leftover point of other triangle. Triangles should swap inner edge with previously not used diagonal edge if  circumcircle of one triangle included 3rd point of other triangle. Up to 4 (that is if they are not on the outer hull) outer edges should be checked against adjacent triangle for need to rebalance if new circumcircles started to include other triangle points.
+
+-----------------------------
+
+Let's also add a simplistic and naive Delaunay triangulation build incrementally. 
+
+If we have 1, 2, 3 point, this is already a finished result. However, 3 point triangle must counter clockwise.
+
+I typed that already but we do not really need to start with it.
+
+```
+Algorithm is case we have 4 or more points:
+Choose 2 points with maximum and minimum coordinates on some axis. Build a line through these points. Find 3rd point furthest away from the lines. Three points form the first triangle.
+Yup. Scratch that.
+```
+
+
+Find minimum and maximum x and y coordinates of data set. Calculate circumcircle around this rectangle. Build virtual big equilateral triangle, incircle of which is exactly circumcircle of dataset min/max rectangle.
+
+Points of virtual triangle are remembered as starting points for navigation. Our triangulation with triangles is not just only a planar graph with edge intersection but also a good source of geometry information for navigation. If new point does not lie within the current triangle we can choose the best edge to direct navigation toward closer located triangle.
+
+When triangle containing the insertion point is found, we create 3 triangles inside of containing triangle. All three new triangles are checked for need to swap edges with their adjacent neighbor triangles sharing an edge.
+
+For each dataset point, navigate from root(s) to containing triangle and insert the point that adds 3 triangles triggering a wave of edge swap check.
+
+Remove virtual big triangle.
+Go around outer boundary and collect the convex hull.

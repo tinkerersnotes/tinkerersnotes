@@ -10,8 +10,9 @@ between the bridges is zipped up with triangles from one bridge to the other, an
 two triangles break the empty circle rule is flipped (Lawson), which can reach deep into either
 half. When no edge is left to flip, the triangulation is Delaunay.
 
-Points are assumed in general position (no three on a line, no four on a circle), which uniformly
-distributed random points are, with probability 1.
+Points are assumed to have no three on a line, which uniformly distributed random points satisfy
+with probability 1. Four or more on a circle are fine: any of their triangulations is Delaunay, and the
+circle test ignores differences within rounding noise, so such edges never flip back and forth.
 
     python divide_and_conquer.py [N] [--seed SEED] [--save picture.png]
 """
@@ -36,6 +37,16 @@ def in_circle(a, b, c, d):
     return (ax * (by * c2 - b2 * cy)
             - ay * (bx * c2 - b2 * cx)
             + a2 * (bx * cy - by * cx))
+
+
+def inside_circle(a, b, c, d):
+    """True when d lies clearly inside the circle through the counterclockwise triangle abc: the circle
+    test beats its rounding noise, a small fraction of the sum of its terms' sizes. A point on the
+    circle, like any of many points placed on one circle, is not inside."""
+    (ax, ay), (bx, by), (cx, cy) = [(abs(p[0] - d[0]), abs(p[1] - d[1])) for p in (a, b, c)]
+    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    size = ax * (by * c2 + b2 * cy) + ay * (bx * c2 + b2 * cx) + a2 * (bx * cy + by * cx)
+    return in_circle(a, b, c, d) > 1e-12 * size
 
 
 def inside_angle(o, a, b, x):
@@ -84,15 +95,19 @@ class Triangulation:
     def triangles(self):
         return sorted({min((a, b, c), (b, c, a), (c, a, b)) for (a, b), c in self.apex.items()})
 
+    def inside(self, a, b, c, d):
+        """True when point d is clearly inside the circle through the counterclockwise triangle a, b, c."""
+        P = self.points
+        return inside_circle(P[a], P[b], P[c], P[d])
+
     def legalize(self, edges):
         """Flip edges until none of them, nor any edge a flip touches, breaks the empty circle rule.
         Other edges keep their two triangles, so stay as legal as they were."""
-        P = self.points
         stack = list(edges)
         while stack:
             a, b = stack.pop()
             c, d = self.apex.get((a, b)), self.apex.get((b, a))
-            if c is None or d is None or in_circle(P[a], P[b], P[c], P[d]) <= 0:
+            if c is None or d is None or not self.inside(a, b, c, d):
                 continue  # A hull edge, an edge flipped away meanwhile, or a legal edge
             # Triangles a, b, c and b, a, d make the convex quadrilateral a, d, b, c: swap the
             # diagonal a-b for c-d and check the four outer edges against their own neighbours
@@ -104,9 +119,8 @@ class Triangulation:
             stack += [(a, d), (d, b), (b, c), (c, a)]
 
     def illegal_edges(self):
-        P = self.points
         return [(a, b) for (a, b), c in self.apex.items()
-                if (b, a) in self.apex and in_circle(P[a], P[b], P[c], P[self.apex[b, a]]) > 0]
+                if (b, a) in self.apex and self.inside(a, b, c, self.apex[b, a])]
 
     def triangulate(self, ids, depth=0):
         """Triangulate the points ids, return their convex hull in counterclockwise order."""
@@ -221,7 +235,7 @@ class Triangulation:
         return walk(right, r_low, r_high, +1) + walk(left, l_high, l_low, +1)
 
 
-def draw(t, n, seed, save):
+def draw(t, title, save=None):
     import matplotlib
     if save:
         matplotlib.use('Agg')
@@ -278,7 +292,7 @@ def draw(t, n, seed, save):
     conquer.set_title(f'Conquer: {len(triangles)} Delaunay triangles, {t.flips} edge flips')
     conquer.legend(loc='upper right', fontsize=8)
 
-    fig.suptitle(f'Divide and conquer triangulation of {n} uniform random points (seed {seed})')
+    fig.suptitle(title)
     fig.tight_layout()
     if save:
         fig.savefig(save, dpi=120)
@@ -298,7 +312,8 @@ def main():
     t = Triangulation(points)
     print(f'{args.n} points: {len(t.triangles())} triangles, hull of {len(t.hull)}, '
           f'{t.flips} flips, {len(t.illegal_edges())} illegal edges left')
-    draw(t, args.n, args.seed, args.save)
+    draw(t, f'Divide and conquer triangulation of {args.n} uniform random points (seed {args.seed})',
+         args.save)
 
 
 if __name__ == '__main__':
