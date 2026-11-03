@@ -1,7 +1,8 @@
 # Builds the standalone demo pages and publishes them on GitHub Pages, at
 # https://<owner>.github.io/<repo>/: pages/index.html, which links to the demos,
-# seam_carver.html (wasm_seam_carver/build.sh), seam_terrain.html (seam_terrain/build.sh) and
-# moving_points.html (triangulation/, hand-written, copied as it is).
+# seam_carver.html (wasm_seam_carver/build.sh), seam_terrain.html (seam_terrain/build.sh), and
+# moving_points.html and box_projections.html (triangulation/, hand-written, copied as they are with
+# the delaunay.js they share).
 #
 # One-time setup in the repository: Settings > Pages > Build and deployment > Source: GitHub Actions.
 name: Publish demo pages
@@ -17,6 +18,8 @@ on:
       - 'parallel_seam_carver/**'
       - 'tundra_1280x958.jpeg'
       - 'triangulation/moving_points.html'
+      - 'triangulation/box_projections.html'
+      - 'triangulation/delaunay.js'
       - '.github/workflows/pages.yml'
   workflow_dispatch:  # also runs from the Actions tab
 
@@ -57,7 +60,7 @@ jobs:
           cp pages/index.html site/
           cp wasm_seam_carver/seam_carver.html site/
           cp seam_terrain/seam_terrain.html site/
-          cp triangulation/moving_points.html site/
+          cp triangulation/moving_points.html triangulation/box_projections.html triangulation/delaunay.js site/
           cp wasm_seam_carver/isolation_service_worker.js site/
 
       - uses: actions/upload-pages-artifact@v3

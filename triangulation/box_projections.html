@@ -1,0 +1,537 @@
+<!doctype html>
+<!-- Points moving in a 3D box, projected onto the coordinate planes xOy, yOz and zOx, each projection
+     triangulated every frame by the divide and conquer algorithm in delaunay.js. Opens straight from
+     disk, next to delaunay.js. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projected Delaunay Triangulations</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --panel: #f3f2ef;
+    --border: #dcdad5;
+    --text: #0b0b0b;
+    --text-secondary: #52514e;
+    --accent: #2a78d6;
+    --box: #a3a19b;
+    --cloud: #0b0b0b;
+    /* The projections are pure red, green and blue, which mix the way light does: an edge on two hulls
+       is yellow, magenta or cyan, on all three white, or light grey here, where white wouldn't show */
+    --xy: #c80000;
+    --yz: #00c800;
+    --zx: #0000c8;
+    --xy-text: #b00000;
+    --yz-text: #007a00;
+    --zx-text: #0000b0;
+    --halo: rgba(0, 0, 0, 0.45);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19;
+      --panel: #242423;
+      --border: #3a3a38;
+      --text: #f0efec;
+      --text-secondary: #c3c2b7;
+      --accent: #3987e5;
+      --box: #6b6a66;
+      --cloud: #f0efec;
+      --xy: #ff2a2a;
+      --yz: #2aff2a;
+      --zx: #3a5aff;
+      --xy-text: #ff6b6b;
+      --yz-text: #51cf66;
+      --zx-text: #74a8ff;
+      --halo: rgba(0, 0, 0, 0.6);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 16px 32px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .lede { color: var(--text-secondary); margin: 0 0 12px; max-width: 75ch; }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 24px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  #count { width: min(320px, 50vw); accent-color: var(--accent); }
+  #count-value { min-width: 4ch; font-variant-numeric: tabular-nums; }
+  .controls input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; margin: 0; }
+  button {
+    font: inherit;
+    padding: 4px 14px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover, button:focus-visible { border-color: var(--accent); }
+  canvas {
+    display: block;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  #scene { height: min(62vh, 70vw); cursor: grab; touch-action: none; }
+  #scene.dragging { cursor: grabbing; }
+  .planes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+  .planes canvas { aspect-ratio: 1; height: auto; }
+  .planes figure { margin: 0; }
+  /* One line each, so changing numbers never move the panels */
+  .planes figcaption {
+    margin-top: 4px;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .xy { color: var(--xy-text); }
+  .yz { color: var(--yz-text); }
+  .zx { color: var(--zx-text); }
+  @media (max-width: 560px) { .planes { grid-template-columns: 1fr; } }
+  /* One line under the scene, so changing numbers never move it */
+  #status {
+    margin: 8px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Projected Delaunay triangulations</h1>
+  <p class="lede">Points move around a box and bounce off its walls, each with the speed and direction it got
+    at the start. Every frame, they are projected onto the three coordinate planes, and each projection is
+    triangulated by a divide and conquer algorithm: <span class="xy">xOy</span> on the floor,
+    <span class="yz">yOz</span> and <span class="zx">zOx</span> on the back walls. The edges of each
+    projection's convex hull also join the points in the box, in the same colour. An edge on more than one hull
+    mixes their colours as light does: yellow, magenta or cyan for two, white for all three (light grey on a
+    light background). Drag to turn the box.</p>
+
+  <div class="controls">
+    <label>Points <input id="count" type="range" min="3" max="500" step="1" value="25">
+      <output id="count-value" for="count">25</output></label>
+    <label><input id="play" type="checkbox" checked> Play</label>
+    <label><input id="turn" type="checkbox" checked> Turn slowly</label>
+    <button id="reset" type="button">Reset</button>
+  </div>
+
+  <canvas id="scene" aria-label="Points in a box with their projections"></canvas>
+  <p id="status">&nbsp;</p>
+
+  <div class="planes">
+    <figure><canvas id="plane-xy" aria-label="Projection onto xOy"></canvas>
+      <figcaption class="xy" id="caption-xy">xOy</figcaption></figure>
+    <figure><canvas id="plane-yz" aria-label="Projection onto yOz"></canvas>
+      <figcaption class="yz" id="caption-yz">yOz</figcaption></figure>
+    <figure><canvas id="plane-zx" aria-label="Projection onto zOx"></canvas>
+      <figcaption class="zx" id="caption-zx">zOx</figcaption></figure>
+  </div>
+</main>
+
+<script src="delaunay.js"></script>
+<script>
+const countInput = document.getElementById('count');
+const countValue = document.getElementById('count-value');
+const playInput = document.getElementById('play');
+const turnInput = document.getElementById('turn');
+const status = document.getElementById('status');
+const scene = document.getElementById('scene');
+
+const capacity = Number(countInput.max);
+// Positions in the unit box, velocities in box sizes per second
+const X = new Float64Array(capacity), Y = new Float64Array(capacity), Z = new Float64Array(capacity);
+const VX = new Float64Array(capacity), VY = new Float64Array(capacity), VZ = new Float64Array(capacity);
+let count = 0, dirty = true, skipped = 0, averageMs = 0, shared = 0;
+
+// The three projections: which coordinates make each plane's horizontal and vertical axes, and where
+// the plane lies in the box (the coordinate left out is 0 there)
+const projections = [
+  {name: 'xy', label: 'xOy', u: X, v: Y, axes: ['x', 'y'], place: (u, v) => [u, v, 0]},
+  {name: 'yz', label: 'yOz', u: Y, v: Z, axes: ['y', 'z'], place: (u, v) => [0, u, v]},
+  {name: 'zx', label: 'zOx', u: Z, v: X, axes: ['z', 'x'], place: (u, v) => [v, 0, u]},
+];
+for (const p of projections) {
+  p.canvas = document.getElementById(`plane-${p.name}`);
+  p.context = p.canvas.getContext('2d');
+  p.caption = document.getElementById(`caption-${p.name}`);
+  p.triangulation = null;
+}
+
+function randomPoint(i) {
+  // Uniform in the box, moving with a speed and direction of its own: uniform on the sphere
+  X[i] = Math.random();
+  Y[i] = Math.random();
+  Z[i] = Math.random();
+  const speed = 0.04 + 0.12 * Math.random();
+  const z = 2 * Math.random() - 1, angle = 2 * Math.PI * Math.random(), r = Math.sqrt(1 - z * z);
+  VX[i] = speed * r * Math.cos(angle);
+  VY[i] = speed * r * Math.sin(angle);
+  VZ[i] = speed * z;
+}
+
+function setCount(n) {
+  // Keep the points already moving, add new random ones or drop the last
+  for (let i = count; i < n; i++) randomPoint(i);
+  count = n;
+  countValue.value = n;
+  dirty = true;
+}
+
+function reset() {
+  for (let i = 0; i < count; i++) randomPoint(i);
+  dirty = true;
+}
+
+function move(seconds) {
+  // Bounce: reflect a coordinate back inside and turn its velocity around
+  for (const [P, V] of [[X, VX], [Y, VY], [Z, VZ]]) {
+    for (let i = 0; i < count; i++) {
+      P[i] += V[i] * seconds;
+      if (P[i] < 0) { P[i] = -P[i]; V[i] = -V[i]; }
+      if (P[i] > 1) { P[i] = 2 - P[i]; V[i] = -V[i]; }
+    }
+  }
+  dirty = true;
+}
+
+function triangulate() {
+  const start = performance.now();
+  for (const p of projections) {
+    try {
+      p.triangulation = new Triangulation(p.u.subarray(0, count), p.v.subarray(0, count), count);
+    } catch (error) {
+      // A degenerate moment (points in line on this plane): skip this frame's triangles
+      p.triangulation = null;
+      skipped++;
+    }
+  }
+  const ms = performance.now() - start;
+  averageMs = averageMs ? 0.9 * averageMs + 0.1 * ms : ms;
+}
+
+function edgesOf(t) {
+  // Every edge once, as [a, b]: from its smaller end, or from either end on the hull
+  const n = t.n, edges = [];
+  for (const key of t.apex.keys()) {
+    const a = Math.floor(key / n), b = key - a * n;
+    if (a < b || !t.apex.has(b * n + a)) edges.push([a, b]);
+  }
+  return edges;
+}
+
+function hullEdgesOf(t) {
+  return t.hull.length > 1 ? t.hull.map((v, i) => [v, t.hull[(i + 1) % t.hull.length]]) : [];
+}
+
+function colours() {
+  const style = getComputedStyle(document.documentElement);
+  const get = name => style.getPropertyValue(name).trim();
+  return {surface: get('--surface'), box: get('--box'), cloud: get('--cloud'), text: get('--text-secondary'),
+          xy: get('--xy'), yz: get('--yz'), zx: get('--zx'), halo: get('--halo')};
+}
+let palette = colours();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  palette = colours();
+  dirty = true;
+});
+
+function blend(hexColours) {
+  // #rrggbb colours added as light adds, in linear light and up to full brightness: red and green
+  // make yellow, all three primaries white
+  const toLinear = c => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const toSrgb = c => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+  const sum = [0, 0, 0];
+  for (const hex of hexColours) {
+    for (let i = 0; i < 3; i++) sum[i] += toLinear(parseInt(hex.slice(1 + 2 * i, 3 + 2 * i), 16) / 255);
+  }
+  return '#' + sum.map(c => Math.round(255 * toSrgb(Math.min(c, 1))).toString(16).padStart(2, '0')).join('');
+}
+
+function fit(canvas) {
+  // Size the drawing buffer to the canvas's CSS size; returns that size
+  const rect = canvas.getBoundingClientRect(), ratio = window.devicePixelRatio || 1;
+  const w = Math.round(rect.width * ratio), h = Math.round(rect.height * ratio);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  canvas.getContext('2d').setTransform(ratio, 0, 0, ratio, 0, 0);
+  return [rect.width, rect.height];
+}
+
+// The camera circles the box's centre: azimuth around the z axis from +x, elevation above the floor.
+// From the default, between +x and +y and above, the three coordinate planes are the back walls.
+const camera = {azimuth: Math.PI / 4, elevation: Math.PI / 7, distance: 3.2};
+let view = null;
+
+function setView(width, height) {
+  const {azimuth, elevation, distance} = camera;
+  const eye = [0.5 + distance * Math.cos(elevation) * Math.cos(azimuth),
+               0.5 + distance * Math.cos(elevation) * Math.sin(azimuth),
+               0.5 + distance * Math.sin(elevation)];
+  const forward = normalise([0.5 - eye[0], 0.5 - eye[1], 0.5 - eye[2]]);
+  const right = normalise(crossProduct(forward, [0, 0, 1]));
+  const up = crossProduct(right, forward);
+  // The box's bounding sphere fills 90% of the shorter side, whichever way it is turned
+  const radius = Math.sqrt(3) / 2;
+  const focal = 0.45 * Math.min(width, height) * Math.sqrt(distance ** 2 - radius ** 2) / radius;
+  view = {eye, forward, right, up, focal, cx: width / 2, cy: height / 2};
+}
+
+function project([x, y, z]) {
+  // Perspective: screen position, and depth for sizing points
+  const {eye, forward, right, up, focal, cx, cy} = view;
+  const d = [x - eye[0], y - eye[1], z - eye[2]];
+  const depth = dot(d, forward);
+  return [cx + focal * dot(d, right) / depth, cy - focal * dot(d, up) / depth, depth];
+}
+
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function crossProduct(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function normalise(a) { const l = Math.hypot(...a); return [a[0] / l, a[1] / l, a[2] / l]; }
+
+function line(context, a, b) {
+  context.moveTo(a[0], a[1]);
+  context.lineTo(b[0], b[1]);
+}
+
+function drawScene() {
+  const [width, height] = fit(scene);
+  const context = scene.getContext('2d');
+  setView(width, height);
+  context.fillStyle = palette.surface;
+  context.fillRect(0, 0, width, height);
+  context.lineCap = 'round';
+
+  // Each coordinate plane, tinted in its colour, with its projection drawn on it
+  const corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  for (const p of projections) {
+    const colour = palette[p.name];
+    context.beginPath();
+    corners.forEach(([u, v], i) => {
+      const [sx, sy] = project(p.place(u, v));
+      i ? context.lineTo(sx, sy) : context.moveTo(sx, sy);
+    });
+    context.closePath();
+    context.globalAlpha = 0.06;
+    context.fillStyle = colour;
+    context.fill();
+    context.globalAlpha = 1;
+    const t = p.triangulation;
+    if (!t) continue;
+    const at = i => project(p.place(p.u[i], p.v[i]));
+    context.strokeStyle = colour;
+    context.globalAlpha = 0.45;
+    context.lineWidth = 0.8;
+    context.beginPath();
+    for (const [a, b] of edgesOf(t)) line(context, at(a), at(b));
+    context.stroke();
+    context.globalAlpha = 1;
+    context.lineWidth = 2;
+    context.beginPath();
+    for (const [a, b] of hullEdgesOf(t)) line(context, at(a), at(b));
+    context.stroke();
+    context.fillStyle = colour;
+    context.beginPath();
+    for (let i = 0; i < count; i++) {
+      const [sx, sy] = at(i);
+      context.moveTo(sx + 1.8, sy);
+      context.arc(sx, sy, 1.8, 0, 2 * Math.PI);
+    }
+    context.fill();
+  }
+
+  // The box's twelve edges
+  context.strokeStyle = palette.box;
+  context.lineWidth = 1;
+  context.beginPath();
+  for (const axis of [0, 1, 2]) {
+    for (const s of [0, 1]) {
+      for (const r of [0, 1]) {
+        const a = [0, 0, 0], b = [0, 0, 0];
+        a[(axis + 1) % 3] = b[(axis + 1) % 3] = s;
+        a[(axis + 2) % 3] = b[(axis + 2) % 3] = r;
+        b[axis] = 1;
+        line(context, project(a), project(b));
+      }
+    }
+  }
+  context.stroke();
+
+  // Axis names at the far ends of the edges leaving the origin
+  context.fillStyle = palette.text;
+  context.font = '13px system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  for (const [name, end] of [['x', [1.08, 0, 0]], ['y', [0, 1.08, 0]], ['z', [0, 0, 1.08]], ['O', [-0.04, -0.04, -0.04]]]) {
+    const [sx, sy] = project(end);
+    context.fillText(name, sx, sy);
+  }
+
+  // The hull edges of each projection, joining the points themselves in the box. An edge on more
+  // than one projection's hull is drawn once, in a blend of their colours.
+  const owners = new Map();  // Edge, as smaller end * count + larger end -> bit per projection
+  projections.forEach((p, k) => {
+    if (!p.triangulation) return;
+    for (const [a, b] of hullEdgesOf(p.triangulation)) {
+      const key = Math.min(a, b) * count + Math.max(a, b);
+      owners.set(key, (owners.get(key) || 0) | (1 << k));
+    }
+  });
+  const byOwners = new Map();
+  for (const [key, mask] of owners) {
+    if (!byOwners.has(mask)) byOwners.set(mask, []);
+    byOwners.get(mask).push(key);
+  }
+  const segment = key => {
+    const a = Math.floor(key / count), b = key - a * count;
+    line(context, project([X[a], Y[a], Z[a]]), project([X[b], Y[b], Z[b]]));
+  };
+  // A dark halo under them all keeps the light blends, yellow and white, readable on any background
+  context.strokeStyle = palette.halo;
+  context.lineWidth = 3.4;
+  context.beginPath();
+  for (const key of owners.keys()) segment(key);
+  context.stroke();
+  context.lineWidth = 1.6;
+  shared = 0;
+  for (const [mask, keys] of byOwners) {
+    if (mask & (mask - 1)) shared += keys.length;  // More than one bit
+    context.strokeStyle = blend(projections.filter((p, k) => mask & (1 << k)).map(p => palette[p.name]));
+    context.beginPath();
+    for (const key of keys) segment(key);
+    context.stroke();
+  }
+
+  // The points, nearer ones bigger
+  context.fillStyle = palette.cloud;
+  context.beginPath();
+  for (let i = 0; i < count; i++) {
+    const [sx, sy, depth] = project([X[i], Y[i], Z[i]]);
+    const radius = 3.2 * camera.distance / depth;
+    context.moveTo(sx + radius, sy);
+    context.arc(sx, sy, radius, 0, 2 * Math.PI);
+  }
+  context.fill();
+}
+
+function drawPlane(p) {
+  // A projection flat: the unit square with its horizontal axis to the right and vertical one up
+  const [width, height] = fit(p.canvas);
+  const context = p.context, colour = palette[p.name];
+  const margin = 22, size = Math.min(width, height) - 2 * margin;
+  const at = i => [margin + p.u[i] * size, margin + (1 - p.v[i]) * size];
+  context.fillStyle = palette.surface;
+  context.fillRect(0, 0, width, height);
+  context.strokeStyle = palette.box;
+  context.lineWidth = 1;
+  context.strokeRect(margin, margin, size, size);
+  context.fillStyle = palette.text;
+  context.font = '12px system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(p.axes[0], margin + size / 2, margin + size + 12);
+  context.fillText(p.axes[1], margin - 12, margin + size / 2);
+
+  const t = p.triangulation;
+  if (t) {
+    context.strokeStyle = colour;
+    context.globalAlpha = 0.5;
+    context.lineWidth = 1;
+    context.beginPath();
+    for (const [a, b] of edgesOf(t)) line(context, at(a), at(b));
+    context.stroke();
+    context.globalAlpha = 1;
+    context.lineWidth = 2.5;
+    context.lineJoin = 'round';
+    context.beginPath();
+    for (const [a, b] of hullEdgesOf(t)) line(context, at(a), at(b));
+    context.stroke();
+  }
+  context.fillStyle = colour;
+  context.beginPath();
+  for (let i = 0; i < count; i++) {
+    const [sx, sy] = at(i);
+    context.moveTo(sx + 3, sy);
+    context.arc(sx, sy, 3, 0, 2 * Math.PI);
+  }
+  context.fill();
+  p.caption.textContent = t
+    ? `${p.label} · ${t.apex.size / 3} triangles · hull of ${t.hull.length}`
+    : `${p.label}: triangulation skipped this frame`;
+}
+
+let last = performance.now(), dragging = null;
+function frame(now) {
+  const seconds = Math.min((now - last) / 1000, 0.05);  // A hidden tab must not teleport points
+  last = now;
+  if (playInput.checked) move(seconds);
+  if (turnInput.checked && !dragging) {
+    camera.azimuth += 0.15 * seconds;
+    dirty = true;
+  }
+  if (dirty) {
+    triangulate();
+    drawScene();
+    for (const p of projections) drawPlane(p);
+    status.textContent = `${count} points · ${shared} hull edges shared between projections`
+      + ` · three projections triangulated in ${averageMs.toFixed(2)} ms`
+      + (skipped ? ` · ${skipped} degenerate projections skipped` : '');
+    dirty = false;
+  }
+  requestAnimationFrame(frame);
+}
+
+// Drag to turn: sideways for the azimuth, up and down for the elevation
+scene.addEventListener('pointerdown', event => {
+  dragging = {x: event.clientX, y: event.clientY};
+  scene.setPointerCapture(event.pointerId);
+  scene.classList.add('dragging');
+});
+scene.addEventListener('pointermove', event => {
+  if (!dragging) return;
+  camera.azimuth -= 0.008 * (event.clientX - dragging.x);
+  camera.elevation = Math.max(-1.45, Math.min(1.45, camera.elevation + 0.008 * (event.clientY - dragging.y)));
+  dragging = {x: event.clientX, y: event.clientY};
+  dirty = true;
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  scene.addEventListener(type, () => { dragging = null; scene.classList.remove('dragging'); });
+}
+
+countInput.addEventListener('input', () => setCount(Number(countInput.value)));
+playInput.addEventListener('change', () => { last = performance.now(); });
+document.getElementById('reset').addEventListener('click', reset);
+new ResizeObserver(() => { dirty = true; }).observe(document.querySelector('main'));
+
+if (typeof Triangulation === 'undefined') {
+  // Without it every projection would just be skipped, as if degenerate
+  status.textContent = 'delaunay.js did not load: it has to be next to this page';
+} else {
+  setCount(Number(countInput.value));
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
