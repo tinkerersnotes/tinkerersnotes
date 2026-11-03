@@ -82,17 +82,18 @@ class WeightedTriangulation extends Triangulation {
       return h[a] - (nx * (x[v] - x[a]) + ny * (y[v] - y[a])) / nz;
     };
     // The hole is star-shaped around v, so it has ears: corners turning counterclockwise with no other
-    // corner of the hole inside. Cut off the one whose plane is highest over v.
+    // corner of the hole inside. Cut off the one whose plane is lowest over v, which leaves fewer flips
+    // to do than the highest first.
     const hole = ring.slice(), edges = [];
     while (hole.length > 3) {
-      let best = -1, bestHeight = -Infinity;
+      let best = -1, bestHeight = Infinity;
       for (let i = 0; i < hole.length; i++) {
         const a = hole[(i - 1 + hole.length) % hole.length], b = hole[i], c = hole[(i + 1) % hole.length];
         if (this.orient(a, b, c) <= 0) continue;
         if (hole.some(p => p !== a && p !== b && p !== c
             && this.orient(a, b, p) > 0 && this.orient(b, c, p) > 0 && this.orient(c, a, p) > 0)) continue;
         const height = heightOverV(a, b, c);
-        if (height > bestHeight) { bestHeight = height; best = i; }
+        if (height < bestHeight) { bestHeight = height; best = i; }
       }
       if (best < 0) throw new Error('No ear');
       const a = hole[(best - 1 + hole.length) % hole.length], b = hole[best], c = hole[(best + 1) % hole.length];
