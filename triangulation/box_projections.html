@@ -1,12 +1,12 @@
 <!doctype html>
-<!-- Points moving in a 3D box, projected onto the coordinate planes xOy, yOz and zOx, each projection
-     triangulated every frame by the divide and conquer algorithm in delaunay.js. Opens straight from
-     disk, next to delaunay.js. -->
+<!-- Points moving in a 3D box: their convex hull, from two weighted Delaunay triangulations in
+     weighted_delaunay.js, and their projections onto the coordinate planes xOy, yOz and zOx,
+     triangulated by delaunay.js. Opens straight from disk, next to both scripts. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Projected Delaunay Triangulations</title>
+<title>Convex Hull and Projections</title>
 <style>
   :root {
     color-scheme: light;
@@ -126,19 +126,16 @@
 </head>
 <body>
 <main>
-  <h1>Projected Delaunay triangulations</h1>
-  <p class="lede">Points move around a box and bounce off its walls, each with the speed and direction it got
-    at the start. Every frame, they are projected onto the three coordinate planes, and each projection is
-    triangulated by a divide and conquer algorithm: <span class="xy">xOy</span> on the floor,
-    <span class="yz">yOz</span> and <span class="zx">zOx</span> on the walls behind, set back from the box so
-    they don't hide it. A projection's edges that are also edges of the 3D hull keep their colour; the
-    others are faded. The edges of each projection's convex hull also join the points in the box, in the same
-    colour. An edge on more than one hull
-    mixes their colours as light does: yellow, magenta or cyan for two, white for all three (light grey on a
-    light background). Those edges are silhouettes of the points' 3D convex hull, drawn in light facets tinted
-    by the way they face. The hull itself comes from two weighted Delaunay triangulations of the xOy
-    projection: with heights z they give its lower half, with heights −z its upper half. Drag to turn the
-    box.</p>
+  <h1>A 3D convex hull and its projections</h1>
+  <p class="lede">Points move around a box and bounce off its walls. Every frame their 3D convex hull is built
+    from two weighted Delaunay triangulations of their projection onto xOy: with heights z they give the
+    hull's lower half, with heights −z its upper half. Its facets are tinted by the plane they face. Each
+    coordinate plane, <span class="xy">xOy</span> on the floor, <span class="yz">yOz</span> and
+    <span class="zx">zOx</span> on the walls behind, shows the side of the hull facing it: the weighted
+    triangulation of the projection, heights the distance from the plane, in relief or flat. The panels
+    below show the plain Delaunay triangulations of the projections, edges that aren't hull edges faded.
+    Each projection's outline is a silhouette of the hull, and its edges can be drawn between the points in
+    the box too, mixing colours as light does where outlines share an edge. Drag to turn the box.</p>
 
   <div class="controls">
     <label>Points <input id="count" type="range" min="3" max="500" step="1" value="25">
@@ -148,13 +145,14 @@
     <button id="reset" type="button">Reset</button>
     <span class="group">
       <span class="group-name">Show</span>
-      <label><input id="show-points" type="checkbox" checked> Points</label>
+      <label><input id="show-points" type="checkbox"> Points</label>
       <label><input id="show-planes" type="checkbox" checked> Coordinate planes</label>
+      <label><input id="relief" type="checkbox" checked> in relief</label>
       <label><input id="show-hull" type="checkbox" checked> Convex hull</label>
-      <label><input id="show-silhouettes" type="checkbox" checked> Projections' hull edges</label>
+      <label><input id="show-silhouettes" type="checkbox"> Projections' hull edges</label>
     </span>
-    <label>Hull opacity <input id="hull-opacity" type="range" min="0" max="1" step="0.01" value="0.15">
-      <output id="hull-opacity-value" for="hull-opacity">0.15</output></label>
+    <label>Hull opacity <input id="hull-opacity" type="range" min="0" max="1" step="0.01" value="0.75">
+      <output id="hull-opacity-value" for="hull-opacity">0.75</output></label>
   </div>
 
   <canvas id="scene" aria-label="Points in a box with their projections"></canvas>
@@ -181,6 +179,9 @@ const status = document.getElementById('status');
 const scene = document.getElementById('scene');
 const showPoints = document.getElementById('show-points');
 const showPlanes = document.getElementById('show-planes');
+const reliefInput = document.getElementById('relief');
+// In relief, a point stands out from its plane by its height times RELIEF, short of the box at GAP
+const RELIEF = 0.5;
 const showHull = document.getElementById('show-hull');
 const showSilhouettes = document.getElementById('show-silhouettes');
 const hullOpacity = document.getElementById('hull-opacity');
@@ -205,11 +206,12 @@ const VX = new Float64Array(capacity), VY = new Float64Array(capacity), VZ = new
 let count = 0, dirty = true, skipped = 0, averageMs = 0, shared = 0;
 
 // The three projections: which coordinates make each plane's horizontal and vertical axes, and where
-// the plane lies in the box (the coordinate left out is 0 there)
+// the plane lies in the box (the coordinate left out, w, is 0 there; place(u, v, w) puts a point w out
+// from the plane)
 const projections = [
-  {name: 'xy', label: 'xOy', u: X, v: Y, axes: ['x', 'y'], place: (u, v) => [u, v, 0]},
-  {name: 'yz', label: 'yOz', u: Y, v: Z, axes: ['y', 'z'], place: (u, v) => [0, u, v]},
-  {name: 'zx', label: 'zOx', u: Z, v: X, axes: ['z', 'x'], place: (u, v) => [v, 0, u]},
+  {name: 'xy', label: 'xOy', u: X, v: Y, w: Z, axes: ['x', 'y'], place: (u, v, w = 0) => [u, v, w]},
+  {name: 'yz', label: 'yOz', u: Y, v: Z, w: X, axes: ['y', 'z'], place: (u, v, w = 0) => [w, u, v]},
+  {name: 'zx', label: 'zOx', u: Z, v: X, w: Y, axes: ['z', 'x'], place: (u, v, w = 0) => [v, w, u]},
 ];
 for (const p of projections) {
   p.canvas = document.getElementById(`plane-${p.name}`);
@@ -275,6 +277,17 @@ function triangulate() {
   } catch (error) {
     hull3d = hullEdges = null;
     skipped++;
+  }
+  // On each coordinate plane, the side of the hull facing it: the weighted Delaunay triangulation of the
+  // projection, heights the distance from the plane. For xOy that is the hull's lower half.
+  for (const p of projections) {
+    try {
+      p.weighted = p.name === 'xy' && hull3d ? hull3d.lower
+        : new WeightedTriangulation(p.u.subarray(0, count), p.v.subarray(0, count), count, p.w.subarray(0, count));
+    } catch (error) {
+      p.weighted = null;
+      skipped++;
+    }
   }
   const ms = performance.now() - start;
   averageMs = averageMs ? 0.9 * averageMs + 0.1 * ms : ms;
@@ -391,30 +404,48 @@ function drawScene() {
     polygon([[GAP, GAP], [SCENE, GAP], [SCENE, SCENE], [GAP, SCENE]].map(([u, v]) => project(p.place(u, v))));
     context.stroke();
     context.globalAlpha = 1;
-    const t = p.triangulation;
+    // The side of the hull facing this plane: its weighted triangulation, in relief or flat. Its
+    // vertices are the hull points on that side, its edges hull edges, its outline the projection's hull.
+    const t = p.weighted;
     if (!t) continue;
-    const at = i => project(p.place(GAP + p.u[i], GAP + p.v[i]));
-    context.strokeStyle = colour;
-    context.lineWidth = 0.8;
-    for (const [alpha, wanted] of [[0.12, false], [0.45, true]]) {
-      context.globalAlpha = alpha;
-      context.beginPath();
-      for (const [a, b] of edgesOf(t)) if (onHull(a, b) === wanted) line(context, at(a), at(b));
-      context.stroke();
+    const flat = i => project(p.place(GAP + p.u[i], GAP + p.v[i]));
+    const at = reliefInput.checked ? i => project(p.place(GAP + p.u[i], GAP + p.v[i], RELIEF * p.w[i])) : flat;
+    context.strokeStyle = context.fillStyle = colour;
+    if (reliefInput.checked) {
+      // Light faces, far to near, give the relief its shape
+      const faces = t.triangles().map(face => {
+        const corners = face.map(at);
+        return {corners, depth: corners[0][2] + corners[1][2] + corners[2][2]};
+      }).sort((f, g) => g.depth - f.depth);
+      context.globalAlpha = 0.1;
+      for (const {corners} of faces) {
+        polygon(corners);
+        context.fill();
+      }
     }
+    context.globalAlpha = 0.55;
+    context.lineWidth = 0.8;
+    context.beginPath();
+    for (const [a, b] of edgesOf(t)) line(context, at(a), at(b));
+    context.stroke();
     context.globalAlpha = 1;
     context.lineWidth = 2;
     context.beginPath();
     for (const [a, b] of hullEdgesOf(t)) line(context, at(a), at(b));
     context.stroke();
-    context.fillStyle = colour;
-    context.beginPath();
-    for (let i = 0; i < count; i++) {
-      const [sx, sy] = at(i);
-      context.moveTo(sx + 1.8, sy);
-      context.arc(sx, sy, 1.8, 0, 2 * Math.PI);
+    // Its vertices, and the other points' projections faint and flat on the plane
+    for (const [alpha, radius, redundant] of [[0.3, 1.3, true], [1, 2, false]]) {
+      context.globalAlpha = alpha;
+      context.beginPath();
+      for (let i = 0; i < count; i++) {
+        if (t.redundant.has(i) !== redundant) continue;
+        const [sx, sy] = redundant ? flat(i) : at(i);
+        context.moveTo(sx + radius, sy);
+        context.arc(sx, sy, radius, 0, 2 * Math.PI);
+      }
+      context.fill();
     }
-    context.fill();
+    context.globalAlpha = 1;
   }
 
   // The box's twelve edges, and the axes from the origin along the planes' edges
@@ -626,7 +657,7 @@ for (const type of ['pointerup', 'pointercancel']) {
 
 countInput.addEventListener('input', () => setCount(Number(countInput.value)));
 hullOpacity.addEventListener('input', () => { hullOpacityValue.value = Number(hullOpacity.value).toFixed(2); dirty = true; });
-for (const box of [showPoints, showPlanes, showHull, showSilhouettes]) box.addEventListener('change', () => { dirty = true; });
+for (const box of [showPoints, showPlanes, reliefInput, showHull, showSilhouettes]) box.addEventListener('change', () => { dirty = true; });
 playInput.addEventListener('change', () => { last = performance.now(); });
 document.getElementById('reset').addEventListener('click', reset);
 new ResizeObserver(() => { dirty = true; }).observe(document.querySelector('main'));
