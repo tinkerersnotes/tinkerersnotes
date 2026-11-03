@@ -73,6 +73,10 @@
   #count { width: min(320px, 50vw); accent-color: var(--accent); }
   #count-value { min-width: 4ch; font-variant-numeric: tabular-nums; }
   .controls input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; margin: 0; }
+  .group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .group-name { color: var(--text-secondary); }
+  #hull-opacity { width: min(160px, 40vw); accent-color: var(--accent); }
+  #hull-opacity-value { min-width: 4ch; font-variant-numeric: tabular-nums; }
   button {
     font: inherit;
     padding: 4px 14px;
@@ -126,10 +130,15 @@
   <p class="lede">Points move around a box and bounce off its walls, each with the speed and direction it got
     at the start. Every frame, they are projected onto the three coordinate planes, and each projection is
     triangulated by a divide and conquer algorithm: <span class="xy">xOy</span> on the floor,
-    <span class="yz">yOz</span> and <span class="zx">zOx</span> on the back walls. The edges of each
-    projection's convex hull also join the points in the box, in the same colour. An edge on more than one hull
+    <span class="yz">yOz</span> and <span class="zx">zOx</span> on the walls behind, set back from the box so
+    they don't hide it. A projection's edges that are also edges of the 3D hull keep their colour; the
+    others are faded. The edges of each projection's convex hull also join the points in the box, in the same
+    colour. An edge on more than one hull
     mixes their colours as light does: yellow, magenta or cyan for two, white for all three (light grey on a
-    light background). Drag to turn the box.</p>
+    light background). Those edges are silhouettes of the points' 3D convex hull, drawn in light facets tinted
+    by the way they face. The hull itself comes from two weighted Delaunay triangulations of the xOy
+    projection: with heights z they give its lower half, with heights −z its upper half. Drag to turn the
+    box.</p>
 
   <div class="controls">
     <label>Points <input id="count" type="range" min="3" max="500" step="1" value="25">
@@ -137,6 +146,15 @@
     <label><input id="play" type="checkbox" checked> Play</label>
     <label><input id="turn" type="checkbox" checked> Turn slowly</label>
     <button id="reset" type="button">Reset</button>
+    <span class="group">
+      <span class="group-name">Show</span>
+      <label><input id="show-points" type="checkbox" checked> Points</label>
+      <label><input id="show-planes" type="checkbox" checked> Coordinate planes</label>
+      <label><input id="show-hull" type="checkbox" checked> Convex hull</label>
+      <label><input id="show-silhouettes" type="checkbox" checked> Projections' hull edges</label>
+    </span>
+    <label>Hull opacity <input id="hull-opacity" type="range" min="0" max="1" step="0.01" value="0.15">
+      <output id="hull-opacity-value" for="hull-opacity">0.15</output></label>
   </div>
 
   <canvas id="scene" aria-label="Points in a box with their projections"></canvas>
@@ -153,6 +171,7 @@
 </main>
 
 <script src="delaunay.js"></script>
+<script src="weighted_delaunay.js"></script>
 <script>
 const countInput = document.getElementById('count');
 const countValue = document.getElementById('count-value');
@@ -160,6 +179,24 @@ const playInput = document.getElementById('play');
 const turnInput = document.getElementById('turn');
 const status = document.getElementById('status');
 const scene = document.getElementById('scene');
+const showPoints = document.getElementById('show-points');
+const showPlanes = document.getElementById('show-planes');
+const showHull = document.getElementById('show-hull');
+const showSilhouettes = document.getElementById('show-silhouettes');
+const hullOpacity = document.getElementById('hull-opacity');
+const hullOpacityValue = document.getElementById('hull-opacity-value');
+let hull3d = null;  // The points' 3D convex hull: {faces, lower, upper}
+let hullEdges = null;  // Its edges, as smaller end * count + larger end
+
+// The points' box sits GAP away from the coordinate planes in every direction, so the projections on
+// them stay clear of the hull; the planes reach out to SCENE to cover the box's shadows
+const GAP = 0.6, SCENE = 1 + GAP;
+const world = i => [GAP + X[i], GAP + Y[i], GAP + Z[i]];
+
+function onHull(a, b) {
+  // Is the edge between points a and b on the 3D hull? Without a hull this frame, take every edge as on it
+  return !hullEdges || hullEdges.has(Math.min(a, b) * count + Math.max(a, b));
+}
 
 const capacity = Number(countInput.max);
 // Positions in the unit box, velocities in box sizes per second
@@ -229,6 +266,16 @@ function triangulate() {
       skipped++;
     }
   }
+  // The 3D convex hull: the lower and upper hulls are weighted Delaunay triangulations of the xOy
+  // projection, with heights z and -z
+  try {
+    hull3d = convexHull3d(X.subarray(0, count), Y.subarray(0, count), Z.subarray(0, count), count);
+    hullEdges = new Set(hull3d.faces.flatMap(([a, b, c]) =>
+      [[a, b], [b, c], [c, a]].map(([p, q]) => Math.min(p, q) * count + Math.max(p, q))));
+  } catch (error) {
+    hull3d = hullEdges = null;
+    skipped++;
+  }
   const ms = performance.now() - start;
   averageMs = averageMs ? 0.9 * averageMs + 0.1 * ms : ms;
 }
@@ -287,15 +334,16 @@ let view = null;
 
 function setView(width, height) {
   const {azimuth, elevation, distance} = camera;
-  const eye = [0.5 + distance * Math.cos(elevation) * Math.cos(azimuth),
-               0.5 + distance * Math.cos(elevation) * Math.sin(azimuth),
-               0.5 + distance * Math.sin(elevation)];
-  const forward = normalise([0.5 - eye[0], 0.5 - eye[1], 0.5 - eye[2]]);
+  const centre = SCENE / 2, reach = distance * SCENE;
+  const eye = [centre + reach * Math.cos(elevation) * Math.cos(azimuth),
+               centre + reach * Math.cos(elevation) * Math.sin(azimuth),
+               centre + reach * Math.sin(elevation)];
+  const forward = normalise([centre - eye[0], centre - eye[1], centre - eye[2]]);
   const right = normalise(crossProduct(forward, [0, 0, 1]));
   const up = crossProduct(right, forward);
-  // The box's bounding sphere fills 90% of the shorter side, whichever way it is turned
-  const radius = Math.sqrt(3) / 2;
-  const focal = 0.45 * Math.min(width, height) * Math.sqrt(distance ** 2 - radius ** 2) / radius;
+  // The scene's bounding sphere, planes and box, fills 90% of the shorter side, whichever way it turns
+  const radius = Math.sqrt(3) * SCENE / 2;
+  const focal = 0.45 * Math.min(width, height) * Math.sqrt(reach ** 2 - radius ** 2) / radius;
   view = {eye, forward, right, up, focal, cx: width / 2, cy: height / 2};
 }
 
@@ -324,29 +372,36 @@ function drawScene() {
   context.fillRect(0, 0, width, height);
   context.lineCap = 'round';
 
-  // Each coordinate plane, tinted in its colour, with its projection drawn on it
-  const corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
-  for (const p of projections) {
-    const colour = palette[p.name];
+  // Each coordinate plane, tinted in its colour, with the box's shadow outlined and the projection drawn
+  // on it. Projection edges that aren't edges of the 3D hull are faded.
+  const polygon = (points, close = true) => {
     context.beginPath();
-    corners.forEach(([u, v], i) => {
-      const [sx, sy] = project(p.place(u, v));
-      i ? context.lineTo(sx, sy) : context.moveTo(sx, sy);
-    });
-    context.closePath();
+    points.forEach(([sx, sy], i) => (i ? context.lineTo(sx, sy) : context.moveTo(sx, sy)));
+    if (close) context.closePath();
+  };
+  for (const p of showPlanes.checked ? projections : []) {
+    const colour = palette[p.name];
+    polygon([[0, 0], [SCENE, 0], [SCENE, SCENE], [0, SCENE]].map(([u, v]) => project(p.place(u, v))));
     context.globalAlpha = 0.06;
     context.fillStyle = colour;
     context.fill();
+    context.globalAlpha = 0.5;
+    context.strokeStyle = palette.box;
+    context.lineWidth = 0.8;
+    polygon([[GAP, GAP], [SCENE, GAP], [SCENE, SCENE], [GAP, SCENE]].map(([u, v]) => project(p.place(u, v))));
+    context.stroke();
     context.globalAlpha = 1;
     const t = p.triangulation;
     if (!t) continue;
-    const at = i => project(p.place(p.u[i], p.v[i]));
+    const at = i => project(p.place(GAP + p.u[i], GAP + p.v[i]));
     context.strokeStyle = colour;
-    context.globalAlpha = 0.45;
     context.lineWidth = 0.8;
-    context.beginPath();
-    for (const [a, b] of edgesOf(t)) line(context, at(a), at(b));
-    context.stroke();
+    for (const [alpha, wanted] of [[0.12, false], [0.45, true]]) {
+      context.globalAlpha = alpha;
+      context.beginPath();
+      for (const [a, b] of edgesOf(t)) if (onHull(a, b) === wanted) line(context, at(a), at(b));
+      context.stroke();
+    }
     context.globalAlpha = 1;
     context.lineWidth = 2;
     context.beginPath();
@@ -362,35 +417,65 @@ function drawScene() {
     context.fill();
   }
 
-  // The box's twelve edges
+  // The box's twelve edges, and the axes from the origin along the planes' edges
   context.strokeStyle = palette.box;
   context.lineWidth = 1;
   context.beginPath();
   for (const axis of [0, 1, 2]) {
-    for (const s of [0, 1]) {
-      for (const r of [0, 1]) {
+    for (const s of [GAP, SCENE]) {
+      for (const r of [GAP, SCENE]) {
         const a = [0, 0, 0], b = [0, 0, 0];
         a[(axis + 1) % 3] = b[(axis + 1) % 3] = s;
         a[(axis + 2) % 3] = b[(axis + 2) % 3] = r;
-        b[axis] = 1;
+        a[axis] = GAP;
+        b[axis] = SCENE;
         line(context, project(a), project(b));
       }
     }
+    const end = [0, 0, 0];
+    end[axis] = SCENE;
+    line(context, project([0, 0, 0]), project(end));
   }
   context.stroke();
 
-  // Axis names at the far ends of the edges leaving the origin
+  // Axis names at the far ends of the axes
   context.fillStyle = palette.text;
   context.font = '13px system-ui, sans-serif';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
-  for (const [name, end] of [['x', [1.08, 0, 0]], ['y', [0, 1.08, 0]], ['z', [0, 0, 1.08]], ['O', [-0.04, -0.04, -0.04]]]) {
+  const far = SCENE + 0.1;
+  for (const [name, end] of [['x', [far, 0, 0]], ['y', [0, far, 0]], ['z', [0, 0, far]], ['O', [-0.06, -0.06, -0.06]]]) {
     const [sx, sy] = project(end);
     context.fillText(name, sx, sy);
   }
 
-  // The hull edges of each projection, joining the points themselves in the box. An edge on more
-  // than one projection's hull is drawn once, in a blend of their colours.
+  // The 3D convex hull, facets far to near so nearer ones lie on top. Each is tinted by where it faces,
+  // in the projections' colours: up or down like xOy, along x like yOz, along y like zOx.
+  if (showHull.checked && hull3d) {
+    const opacity = Number(hullOpacity.value);
+    const facets = hull3d.faces.map(face => {
+      const [a, b, c] = face.map(world);
+      const normal = normalise(crossProduct([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]));
+      const corners = [a, b, c].map(project);
+      return {corners, depth: (corners[0][2] + corners[1][2] + corners[2][2]) / 3, normal};
+    }).sort((f, g) => g.depth - f.depth);
+    context.lineWidth = 0.8;
+    for (const {corners, normal} of facets) {
+      context.beginPath();
+      corners.forEach(([sx, sy], i) => (i ? context.lineTo(sx, sy) : context.moveTo(sx, sy)));
+      context.closePath();
+      context.globalAlpha = opacity;
+      context.fillStyle = facetColour(normal);
+      context.fill();
+      context.globalAlpha = Math.min(1, 0.15 + opacity);
+      context.strokeStyle = palette.box;
+      context.stroke();
+    }
+    context.globalAlpha = 1;
+  }
+
+  // The hull edges of each projection, joining the points themselves in the box: silhouette edges of
+  // the 3D hull. An edge on more than one projection's hull is drawn once, in a blend of their colours.
   const owners = new Map();  // Edge, as smaller end * count + larger end -> bit per projection
   projections.forEach((p, k) => {
     if (!p.triangulation) return;
@@ -400,40 +485,54 @@ function drawScene() {
     }
   });
   const byOwners = new Map();
+  shared = 0;
   for (const [key, mask] of owners) {
     if (!byOwners.has(mask)) byOwners.set(mask, []);
     byOwners.get(mask).push(key);
+    if (mask & (mask - 1)) shared++;  // More than one bit
   }
-  const segment = key => {
-    const a = Math.floor(key / count), b = key - a * count;
-    line(context, project([X[a], Y[a], Z[a]]), project([X[b], Y[b], Z[b]]));
-  };
-  // A dark halo under them all keeps the light blends, yellow and white, readable on any background
-  context.strokeStyle = palette.halo;
-  context.lineWidth = 3.4;
-  context.beginPath();
-  for (const key of owners.keys()) segment(key);
-  context.stroke();
-  context.lineWidth = 1.6;
-  shared = 0;
-  for (const [mask, keys] of byOwners) {
-    if (mask & (mask - 1)) shared += keys.length;  // More than one bit
-    context.strokeStyle = blend(projections.filter((p, k) => mask & (1 << k)).map(p => palette[p.name]));
+  if (showSilhouettes.checked) {
+    const segment = key => {
+      const a = Math.floor(key / count), b = key - a * count;
+      line(context, project(world(a)), project(world(b)));
+    };
+    // A dark halo under them all keeps the light blends, yellow and white, readable on any background
+    context.strokeStyle = palette.halo;
+    context.lineWidth = 3.4;
     context.beginPath();
-    for (const key of keys) segment(key);
+    for (const key of owners.keys()) segment(key);
     context.stroke();
+    context.lineWidth = 1.6;
+    for (const [mask, keys] of byOwners) {
+      context.strokeStyle = blend(projections.filter((p, k) => mask & (1 << k)).map(p => palette[p.name]));
+      context.beginPath();
+      for (const key of keys) segment(key);
+      context.stroke();
+    }
   }
 
   // The points, nearer ones bigger
-  context.fillStyle = palette.cloud;
-  context.beginPath();
-  for (let i = 0; i < count; i++) {
-    const [sx, sy, depth] = project([X[i], Y[i], Z[i]]);
-    const radius = 3.2 * camera.distance / depth;
-    context.moveTo(sx + radius, sy);
-    context.arc(sx, sy, radius, 0, 2 * Math.PI);
+  if (showPoints.checked) {
+    context.fillStyle = palette.cloud;
+    context.beginPath();
+    for (let i = 0; i < count; i++) {
+      const [sx, sy, depth] = project(world(i));
+      const radius = 3.2 * camera.distance * SCENE / depth;
+      context.moveTo(sx + radius, sy);
+      context.arc(sx, sy, radius, 0, 2 * Math.PI);
+    }
+    context.fill();
   }
-  context.fill();
+}
+
+function facetColour([nx, ny, nz]) {
+  // A light tint, mostly white, of the projection colours weighted by how much the facet faces each
+  // plane's normal: z for xOy, x for yOz, y for zOx
+  const weights = [Math.abs(nz), Math.abs(nx), Math.abs(ny)];
+  const colours = [palette.xy, palette.yz, palette.zx].map(hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)));
+  const total = weights[0] + weights[1] + weights[2];
+  const mix = [0, 1, 2].map(ch => weights.reduce((sum, w, k) => sum + w * colours[k][ch], 0) / total);
+  return `rgb(${mix.map(c => Math.round(0.45 * c + 0.55 * 255)).join(' ')})`;
 }
 
 function drawPlane(p) {
@@ -456,12 +555,15 @@ function drawPlane(p) {
 
   const t = p.triangulation;
   if (t) {
+    // Edges that aren't edges of the 3D hull faded, those that are in the projection's colour
     context.strokeStyle = colour;
-    context.globalAlpha = 0.5;
     context.lineWidth = 1;
-    context.beginPath();
-    for (const [a, b] of edgesOf(t)) line(context, at(a), at(b));
-    context.stroke();
+    for (const [alpha, wanted] of [[0.15, false], [0.5, true]]) {
+      context.globalAlpha = alpha;
+      context.beginPath();
+      for (const [a, b] of edgesOf(t)) if (onHull(a, b) === wanted) line(context, at(a), at(b));
+      context.stroke();
+    }
     context.globalAlpha = 1;
     context.lineWidth = 2.5;
     context.lineJoin = 'round';
@@ -495,8 +597,10 @@ function frame(now) {
     triangulate();
     drawScene();
     for (const p of projections) drawPlane(p);
-    status.textContent = `${count} points · ${shared} hull edges shared between projections`
-      + ` · three projections triangulated in ${averageMs.toFixed(2)} ms`
+    status.textContent = `${count} points`
+      + (hull3d ? ` · convex hull of ${hull3d.faces.length} faces, ${new Set(hull3d.faces.flat()).size} vertices` : '')
+      + ` · ${shared} hull edges shared between projections`
+      + ` · projections and hull in ${averageMs.toFixed(2)} ms`
       + (skipped ? ` · ${skipped} degenerate projections skipped` : '');
     dirty = false;
   }
@@ -521,6 +625,8 @@ for (const type of ['pointerup', 'pointercancel']) {
 }
 
 countInput.addEventListener('input', () => setCount(Number(countInput.value)));
+hullOpacity.addEventListener('input', () => { hullOpacityValue.value = Number(hullOpacity.value).toFixed(2); dirty = true; });
+for (const box of [showPoints, showPlanes, showHull, showSilhouettes]) box.addEventListener('change', () => { dirty = true; });
 playInput.addEventListener('change', () => { last = performance.now(); });
 document.getElementById('reset').addEventListener('click', reset);
 new ResizeObserver(() => { dirty = true; }).observe(document.querySelector('main'));

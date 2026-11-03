@@ -2,7 +2,7 @@
 # https://<owner>.github.io/<repo>/: pages/index.html, which links to the demos,
 # seam_carver.html (wasm_seam_carver/build.sh), seam_terrain.html (seam_terrain/build.sh), and
 # moving_points.html and box_projections.html (triangulation/, hand-written, copied as they are with
-# the delaunay.js they share).
+# the delaunay.js they share, and the weighted_delaunay.js box_projections.html builds on it).
 #
 # One-time setup in the repository: Settings > Pages > Build and deployment > Source: GitHub Actions.
 name: Publish demo pages
@@ -20,6 +20,7 @@ on:
       - 'triangulation/moving_points.html'
       - 'triangulation/box_projections.html'
       - 'triangulation/delaunay.js'
+      - 'triangulation/weighted_delaunay.js'
       - '.github/workflows/pages.yml'
   workflow_dispatch:  # also runs from the Actions tab
 
@@ -60,7 +61,8 @@ jobs:
           cp pages/index.html site/
           cp wasm_seam_carver/seam_carver.html site/
           cp seam_terrain/seam_terrain.html site/
-          cp triangulation/moving_points.html triangulation/box_projections.html triangulation/delaunay.js site/
+          cp triangulation/moving_points.html triangulation/box_projections.html site/
+          cp triangulation/delaunay.js triangulation/weighted_delaunay.js site/
           cp wasm_seam_carver/isolation_service_worker.js site/
 
       - uses: actions/upload-pages-artifact@v3

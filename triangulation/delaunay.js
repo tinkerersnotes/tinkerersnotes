@@ -6,10 +6,12 @@
 // moving random points satisfy with probability 1; a degenerate case throws, and a page skips that
 // frame.
 class Triangulation {
-  constructor(x, y, n) {
+  constructor(x, y, n, fields = {}) {
     this.x = x;
     this.y = y;
     this.n = n;
+    // A subclass's own fields, set here because the triangulation is built before its constructor goes on
+    Object.assign(this, fields);
     // Directed edge a -> b, as the key a * n + b, -> apex c of the counterclockwise triangle a, b, c.
     // The triangle on the other side of the edge, if any, is under b -> a.
     this.apex = new Map();
