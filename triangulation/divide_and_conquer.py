@@ -11,7 +11,7 @@ two triangles break the empty circle rule is flipped (Lawson), which can reach d
 half. When no edge is left to flip, the triangulation is Delaunay.
 
 Dual: joining the circumcentres of triangles across each inner edge gives the Voronoi diagram, and
-each hull edge gets a short stump outwards, standing in for its ray to infinity.
+each hull edge gets a ray outwards, drawn to the edge of the view instead of to infinity.
 
 Points are assumed to have no three on a line, which uniformly distributed random points satisfy
 with probability 1. Four or more on a circle are fine: any of their triangulations is Delaunay, and the
@@ -62,6 +62,18 @@ def angles_overlap(o, a1, a2, b1, b2):
     """True when the angles at o from a1 to a2 and from b1 to b2, each less than pi, overlap: then
     one of them starts inside the other."""
     return inside_angle(o, a1, a2, b1) or inside_angle(o, b1, b2, a1)
+
+
+def exit_distance(p, u, box):
+    """How far from p, inside box (x0, y0, x1, y1), a ray along the unit vector u leaves it."""
+    x0, y0, x1, y1 = box
+    t = np.inf
+    for v, d, low, high in ((p[0], u[0], x0, x1), (p[1], u[1], y0, y1)):
+        if d > 0:
+            t = min(t, (high - v) / d)
+        elif d < 0:
+            t = min(t, (low - v) / d)
+    return t
 
 
 def walk(hull, start, stop, step):
@@ -133,17 +145,19 @@ class Triangulation:
         b2, c2, d = bx * bx + by * by, cx * cx + cy * cy, 2 * (bx * cy - by * cx)
         return ax + (cy * b2 - by * c2) / d, ay + (bx * c2 - cx * b2) / d
 
-    def voronoi(self, stump):
+    def voronoi(self, stump, box=None):
         """The dual of the triangulation, the Voronoi diagram: one edge for each of its edges, as
         ((x1, y1), (x2, y2)). Returns the edges joining the circumcentres of the two triangles on
-        either side of an inner edge, and the stumps for hull edges.
+        either side of an inner edge, and the rays for hull edges.
 
-        A hull edge's dual is a ray outwards from its triangle's circumcentre, along the edge's
-        outward normal and through its midpoint, since a circumcentre lies on the perpendicular
-        bisector of every edge. Its stump ends at a virtual vertex stump past the hull edge, or past
-        the circumcentre when that is outside already, as for a triangle obtuse opposite the edge."""
+        A hull edge's dual is a ray to infinity, outwards from its triangle's circumcentre, along the
+        edge's outward normal and through its midpoint, since a circumcentre lies on the
+        perpendicular bisector of every edge. It is cut at a virtual vertex at least stump past the
+        hull edge, or past the circumcentre when that is outside already, as for a triangle obtuse
+        opposite the edge. With box, (x0, y0, x1, y1) around the points, it runs on to the box's
+        edge. The midpoint is inside the box, so that is measured from there."""
         P = self.points
-        edges, stumps = [], []
+        edges, rays = [], []
         for (a, b), c in self.apex.items():
             d = self.apex.get((b, a))
             if d is not None:
@@ -156,8 +170,10 @@ class Triangulation:
             normal = np.array([pb[1] - pa[1], pa[0] - pb[0]]) / np.linalg.norm(pb - pa)
             middle = (pa + pb) / 2
             beyond = max((centre - middle) @ normal, 0) + stump
-            stumps.append((tuple(centre), tuple(middle + beyond * normal)))
-        return edges, stumps
+            if box is not None:
+                beyond = max(beyond, exit_distance(middle, normal, box))
+            rays.append((tuple(centre), tuple(middle + beyond * normal)))
+        return edges, rays
 
     def triangulate(self, ids, depth=0):
         """Triangulate the points ids, return their convex hull in counterclockwise order."""
@@ -282,20 +298,20 @@ def draw_dual(ax, t, P, hull):
     lo, hi = P.min(axis=0), P.max(axis=0)
     margin = 0.15 * (hi - lo).max()
     edges = {tuple(sorted(e)) for tri in triangles for e in zip(tri, tri[1:] + tri[:1])}
-    voronoi, stumps = t.voronoi(stump=0.06 * (hi - lo).max())
+    voronoi, rays = t.voronoi(stump=0.06 * (hi - lo).max(), box=(*(lo - margin), *(hi + margin)))
     ax.add_collection(LineCollection([P[list(e)] for e in edges], colors='0.8', lw=0.6))
     ax.add_collection(LineCollection(voronoi, colors='tab:orange', lw=1.2))
-    ax.add_collection(LineCollection(stumps, colors='tab:orange', lw=1.2, linestyles=':'))
+    ax.add_collection(LineCollection(rays, colors='tab:orange', lw=1.2, linestyles=':'))
     centres = np.array([t.circumcentre(*tri) for tri in triangles]).reshape(-1, 2)
     ax.plot(*centres.T, '.', color='tab:orange', ms=4, label='Circumcentres')
     ax.plot([], [], color='tab:orange', lw=1.2, label='Voronoi edges')
-    ax.plot([], [], color='tab:orange', lw=1.2, ls=':', label='Stumps past hull edges')
+    ax.plot([], [], color='tab:orange', lw=1.2, ls=':', label='Rays past hull edges')
     if hull:
         ax.plot(*P[hull + hull[:1]].T, color='0.55', lw=1)
     ax.plot(*P.T, 'o', color='black', ms=4)
     ax.set_xlim(lo[0] - margin, hi[0] + margin)
     ax.set_ylim(lo[1] - margin, hi[1] + margin)
-    ax.set_title(f'Dual: {len(voronoi)} Voronoi edges, {len(stumps)} stumps')
+    ax.set_title(f'Dual: {len(voronoi)} Voronoi edges, {len(rays)} rays')
     if triangles:
         ax.legend(loc='upper right', fontsize=8)
 

@@ -278,7 +278,7 @@ def draw(t, title, save=None):
     result.legend(loc='upper right', fontsize=8)
     result.set_title(f'After removing the virtual triangle: {len(triangles)} of {expected} triangles')
 
-    # Dual of the result. With triangles missing, the stumps follow the dented boundary.
+    # Dual of the result. With triangles missing, the rays follow the dented boundary.
     draw_dual(dual, t, P[:t.n], t.hull)
 
     fig.suptitle(title)

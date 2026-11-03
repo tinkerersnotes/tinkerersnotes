@@ -368,32 +368,35 @@ faster, and the gap would likely narrow, since each walk step costs a lot in Pyt
 For each triangle, take its circumcentre, and join it to the circumcentres of its up to three neighbours
 across its edges. That is the Voronoi diagram: each Delaunay edge has exactly one dual edge, perpendicular
 to it, made of the points equally far from its two ends and further from every other point. A hull edge
-has only one triangle, so its dual is a ray to infinity. As asked, it is drawn as a short stump to a virtual
-vertex outside the hull.
+has only one triangle, so its dual is a ray to infinity. It was first drawn as a short stump to a virtual
+vertex outside the hull; now it runs on to the edge of the view, which reads better as a ray.
 
 - **`Triangulation.circumcentre(a, b, c)`**, measured from `a` to keep the numbers small.
-- **`Triangulation.voronoi(stump)`** returns the joined circumcentres for inner edges and the stumps for
-  hull edges, one entry per Delaunay edge. The incremental class borrows both methods.
-- **Where a stump goes.** A circumcentre lies on the perpendicular bisector of each of its triangle's
+- **`Triangulation.voronoi(stump, box=None)`** returns the joined circumcentres for inner edges and the
+  rays for hull edges, one entry per Delaunay edge. The incremental class borrows both methods.
+- **Where a ray goes.** A circumcentre lies on the perpendicular bisector of each of its triangle's
   edges. So the ray for a hull edge starts at the circumcentre, runs along the edge's outward normal and
-  passes through the edge's midpoint. The stump ends `stump` past the edge's midpoint, or past the
+  passes through the edge's midpoint. It is cut at least `stump` past the edge's midpoint, or past the
   circumcentre when that is already outside the hull, which happens for a triangle obtuse opposite the
-  hull edge. Either way it ends outside.
+  hull edge. Either way it ends outside. Given a `box` around the points, the ray runs on to the box's
+  edge. The midpoint lies inside the box, so the distance to the box's edge is measured from there along
+  the normal; if the circumcentre is outside the box already, the stump rule still ends the ray past
+  it.
 - **Picture.** A third panel, "Dual", in both scripts, drawn by `draw_dual()` in divide_and_conquer.py. Thin
   triangles have far away circumcentres, so the view stays on the points with a 15% margin.
 
 Points on one circle share one circumcentre. For the circle and semicircle set, the dual of each shape's
-inside collapses to one point, its centre, with the stumps radiating out like spokes. The edges counted
+inside collapses to one point, its centre, with the rays radiating out like spokes. The edges counted
 there include many of zero length, between triangles sharing a centre. For the incremental version at scale 1, the
-stumps follow the dented boundary: 143 for the circle and semicircle instead of 116 hull edges.
+rays follow the dented boundary: 143 for the circle and semicircle instead of 116 hull edges.
 
 **Testing**, on 1500 random sets in the three families:
 
-- dual edges and stumps together number 3n − h − 3, one per Delaunay edge, with one stump per hull edge;
+- dual edges and rays together number 3n − h − 3, one per Delaunay edge, with one ray per hull edge;
 - each circumcentre is equally far from its triangle's three corners;
 - each dual edge is perpendicular to its Delaunay edge;
 - at the middle of each dual edge, the nearest points are that edge's two ends, the Voronoi property;
-- every stump ends outside the hull.
+- every ray ends outside the hull, and, given a box, on its edge or beyond.
 
 With corners at infinity, the incremental version gives the same diagram as divide and conquer.
 
@@ -433,7 +436,7 @@ workflow next to the seam carving demos.
 - **The JavaScript port against divide_and_conquer.py**, on 1500 random sets of 1 to 119 points. The
   Python side wrote the points and its results to JSON, and Node ran the code between the page's
   `BEGIN triangulation` and `END triangulation` markers. Triangle sets and hulls were identical, and so
-  were the Voronoi edges and stumps: none of 245 617 segments differed after rounding to 1e-6 of the set's
+  were the Voronoi edges and rays, cut at the same box: none of 245 617 segments differed after rounding to 1e-6 of the set's
   size.
 - **The page in the browser pane:** pause, reset, the slider, the 50-point limit and its release, the
   show checkboxes and own colours. After 20 simulated seconds of repelling, no point was outside the box

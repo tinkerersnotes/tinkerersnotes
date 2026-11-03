@@ -104,8 +104,8 @@
   <p class="lede">Every frame, a divide and conquer algorithm triangulates the points from scratch. It splits
     them by a line through their centre of mass, joins the halves' convex hulls by their two bridges, and flips
     edges until every triangle's circumcircle is empty. Joining the circumcircles' centres across each edge
-    gives the dual, the Voronoi diagram; a hull edge gets a short stump outwards in place of its ray to
-    infinity. The points drift and bounce off the walls, each with the speed and direction it got at the
+    gives the dual, the Voronoi diagram; a hull edge's dual is a ray to infinity, drawn to the edge of the
+    box. The points drift and bounce off the walls, each with the speed and direction it got at the
     start, or repel each other with an acceleration falling off with the square of their distance, slowed by
     friction until they come to rest.</p>
 
@@ -349,14 +349,15 @@ class Triangulation {
     return [x[a] + (cy * b2 - by * c2) / d, y[a] + (bx * c2 - cx * b2) / d];
   }
 
-  voronoi(stump) {
+  voronoi(stump, box) {
     // The dual of the triangulation, one edge for each of its edges, as [x1, y1, x2, y2] segments.
     // Across an inner edge, the circumcentres of its two triangles are joined. A hull edge's dual
-    // is a ray outwards from its triangle's circumcentre, along the edge's outward normal, through
-    // the edge's midpoint, since circumcentres lie on every edge's perpendicular bisector. It ends
-    // at a virtual vertex stump past the hull edge, or past the circumcentre if that is already
-    // outside.
-    const n = this.n, x = this.x, y = this.y, edges = [], stumps = [];
+    // is a ray to infinity outwards from its triangle's circumcentre, along the edge's outward
+    // normal, through the edge's midpoint, since circumcentres lie on every edge's perpendicular
+    // bisector. It is cut at least stump past the hull edge, or past the circumcentre if that is
+    // already outside, and with box, [x0, y0, x1, y1] around the points, runs on to its edge. The
+    // midpoint is inside the box, so that is measured from there.
+    const n = this.n, x = this.x, y = this.y, edges = [], rays = [];
     for (const [key, c] of this.apex) {
       const a = Math.floor(key / n), b = key - a * n;
       const d = this.getApex(b, a);
@@ -369,11 +370,20 @@ class Triangulation {
       const length = Math.hypot(x[b] - x[a], y[b] - y[a]);
       const nx = (y[b] - y[a]) / length, ny = -(x[b] - x[a]) / length;
       const mx = (x[a] + x[b]) / 2, my = (y[a] + y[b]) / 2;
-      const beyond = Math.max((ux - mx) * nx + (uy - my) * ny, 0) + stump;
-      stumps.push([ux, uy, mx + beyond * nx, my + beyond * ny]);
+      let beyond = Math.max((ux - mx) * nx + (uy - my) * ny, 0) + stump;
+      if (box) beyond = Math.max(beyond, exitDistance(mx, my, nx, ny, box));
+      rays.push([ux, uy, mx + beyond * nx, my + beyond * ny]);
     }
-    return {edges, stumps};
+    return {edges, rays};
   }
+}
+
+function exitDistance(px, py, ux, uy, [x0, y0, x1, y1]) {
+  // How far from px, py, inside the box, a ray along the unit vector ux, uy leaves it
+  let t = Infinity;
+  if (ux > 0) t = Math.min(t, (x1 - px) / ux); else if (ux < 0) t = Math.min(t, (x0 - px) / ux);
+  if (uy > 0) t = Math.min(t, (y1 - py) / uy); else if (uy < 0) t = Math.min(t, (y0 - py) / uy);
+  return t;
 }
 
 function walk(hull, start, stop, step) {
@@ -556,16 +566,16 @@ function draw() {
     }
   }
   if (t && showVoronoi.checked) {
-    voronoi = t.voronoi(0.04 * Math.min(width, height));
+    voronoi = t.voronoi(0.04 * Math.min(width, height), [0, 0, width, height]);
     context.strokeStyle = palette.voronoi;
     context.lineWidth = 1.2;
     context.beginPath();
     for (const [x1, y1, x2, y2] of voronoi.edges) { context.moveTo(x1, y1); context.lineTo(x2, y2); }
     context.stroke();
-    // Stumps dashed: each stands in for a ray to infinity
+    // Rays dashed: each goes on to infinity, drawn to the edge of the box
     context.setLineDash([3, 3]);
     context.beginPath();
-    for (const [x1, y1, x2, y2] of voronoi.stumps) { context.moveTo(x1, y1); context.lineTo(x2, y2); }
+    for (const [x1, y1, x2, y2] of voronoi.rays) { context.moveTo(x1, y1); context.lineTo(x2, y2); }
     context.stroke();
     context.setLineDash([]);
   }
@@ -595,7 +605,7 @@ function draw() {
 
   status.textContent = t
     ? `${count} points · ${t.apex.size / 3} triangles · hull of ${t.hull.length} · ${t.flips} flips`
-      + (voronoi ? ` · ${voronoi.edges.length + voronoi.stumps.length} Voronoi edges` : '')
+      + (voronoi ? ` · ${voronoi.edges.length + voronoi.rays.length} Voronoi edges` : '')
       + ` · triangulated in ${averageMs.toFixed(2)} ms` + (skipped ? ` · ${skipped} degenerate frames skipped` : '')
     : `${count} points · triangulation skipped this frame`;
 }
