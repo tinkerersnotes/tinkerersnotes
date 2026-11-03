@@ -5,11 +5,15 @@ Notes on building two Delaunay triangulations in pure Python with numpy, drawn w
 - [divide_and_conquer.py](divide_and_conquer.py), from the prompt in [triangulation.md](triangulation.md);
 - [incremental.py](incremental.py), points inserted one by one into a big virtual triangle.
 
-Both also build the dual, the Voronoi diagram. [moving_points.html](moving_points.html) runs a JavaScript port
-of the divide and conquer version on moving points, every frame, and is published on the GitHub Pages site.
+Both also build the dual, the Voronoi diagram. A JavaScript port of the divide and conquer version,
+[delaunay.js](delaunay.js), runs two pages on the GitHub Pages site: [moving_points.html](moving_points.html),
+moving points triangulated every frame, and [box_projections.html](box_projections.html), points in a 3D box
+with their three coordinate plane projections triangulated. Two more scripts build weighted Delaunay
+(regular) triangulations, which give 3D convex hulls: [weighted_incremental.py](weighted_incremental.py) and
+[weighted_divide_and_conquer.py](weighted_divide_and_conquer.py).
 
 For each: what was built, what went wrong along the way, and how the result was tested. Then how the two
-Python versions compare in speed. The notebooks [divide_and_conquer.ipynb](divide_and_conquer.ipynb) and
+Python versions compare in speed, and what the literature already has. The notebooks [divide_and_conquer.ipynb](divide_and_conquer.ipynb) and
 [incremental.ipynb](incremental.ipynb) run them on the same four point sets.
 
 Both share one edge store. A dictionary maps a directed edge `(a, b)` to the apex `c` of the
@@ -406,7 +410,9 @@ With corners at infinity, the incremental version gives the same diagram as divi
 workflow next to the seam carving demos.
 
 - **The triangulation** is the divide and conquer version ported to JavaScript, rebuilt from scratch every
-  frame, since divide and conquer has no incremental update. Points are indices into coordinate arrays.
+  frame, since divide and conquer has no incremental update. It started inline in the page and now lives in
+  [delaunay.js](delaunay.js), shared with the box projections page and loaded with a plain `<script src>`, so
+  both pages still open from disk. Points are indices into coordinate arrays.
   A directed edge's key is `a·n + b` in a `Map`. The port keeps the relative circle test and the zip's
   corner test, and adds guards: a walk or a flip count that runs away throws. If a frame hits a
   degenerate case, the page skips its triangles instead of freezing, and the status line counts such
@@ -434,8 +440,8 @@ workflow next to the seam carving demos.
 **Testing.**
 
 - **The JavaScript port against divide_and_conquer.py**, on 1500 random sets of 1 to 119 points. The
-  Python side wrote the points and its results to JSON, and Node ran the code between the page's
-  `BEGIN triangulation` and `END triangulation` markers. Triangle sets and hulls were identical, and so
+  Python side wrote the points and its results to JSON, and Node ran the page's triangulation code, at first
+  between `BEGIN triangulation` and `END triangulation` markers in the page, now delaunay.js. Triangle sets and hulls were identical, and so
   were the Voronoi edges and rays, cut at the same box: none of 245 617 segments differed after rounding to 1e-6 of the set's
   size.
 - **The page in the browser pane:** pause, reset, the slider, the 50-point limit and its release, the
@@ -454,10 +460,177 @@ Two traps in testing, worth knowing next time:
   clicks placed from it landed on other controls. Reading the state from the page after each click, and
   taking a fresh screenshot, settled it.
 
+# Part 5: the box projections page
+
+[box_projections.html](box_projections.html): points move in a unit box and bounce off its walls, 25 to
+start with, each with its own speed and a direction uniform on the sphere. Every frame, the points are
+projected onto the three coordinate planes, and delaunay.js triangulates each projection.
+
+- **The 3D view** is drawn in perspective on a 2D canvas, from a camera circling the box's centre. It turns
+  slowly by itself, and dragging turns it by hand.
+- **Each projection is drawn on its coordinate plane**, like a shadow: xOy on the floor z = 0, yOz on the
+  wall x = 0, zOx on the wall y = 0. From the default view all three are at the back. Each shows its
+  points, its edges faint and its convex hull bold. Three flat panels below show the projections again,
+  axes labelled.
+- **Hull edges join the points in the box.** Each edge of a projection's convex hull is, in general
+  position, the shadow of an edge of the points' 3D convex hull: its silhouette seen along that axis. So
+  those edges are drawn between the 3D points too.
+- **Colours that blend.** The projections are pure red, green and blue. An edge on more than one
+  projection's hull is drawn once, in their colours added as light adds, in linear light: yellow, magenta
+  or cyan for two, white for all three. On the light background the primaries are dimmed to 200 of 255,
+  so white comes out light grey, and a dark halo under every hull edge keeps yellow and grey readable.
+  The coloured words in the text use darker shades. Over 400 simulated frames of 25 points, an edge was
+  shared by two projections in about 800 edge-frames per pair, and by all three in 14.
+
+**Testing.** The page needs delaunay.js next to it, and the browser pane shows a local file as a `data:`
+URL, where a relative script can't load: every projection was skipped. So the pages were tested over a
+local server (`.claude/launch.json`), and both now say on their status line when delaunay.js didn't load,
+instead of skipping every frame as if degenerate. Checked: dragging turns the camera; after 60
+simulated seconds every point is inside the box; 500 points take 5.6 ms per whole frame, 2.4 ms of it the
+three triangulations; the colour blends come out as `#c8c800`, `#c800c8`, `#00c8c8` and `#c8c8c8`.
+Only the light theme was seen: the pane always renders light.
+
+The page also raised a question: can the 3D convex hull be built from 2D Delaunay triangulations? Not
+from the three projections. They only give the silhouettes along three axes. Take an octahedron's six
+vertices, slightly perturbed, and p = (0.4, 0.4, 0.4): p is a hull vertex, outside the face
+x + y + z = 1, but every projection puts it inside the diamond. Yes, from one projection, with weights,
+which led to part 6.
+
+# Part 6: weighted Delaunay triangulations and the 3D convex hull
+
+A Delaunay triangulation is already a convex hull: lift each point to (x, y, x² + y²), and the lower hull's
+faces, seen from above, are the Delaunay triangles. The circle test is that lifted orientation test.
+Run it backwards: give each point (x, y) any height h, and the lower hull of (x, y, h), seen from above, is
+the weighted Delaunay or regular triangulation, with weights w = x² + y² − h. Heights z of 3D points give
+their lower hull; heights −z give the upper hull. Glued along the outline seen from above, the
+projection's convex hull, they make the 3D convex hull.
+
+The difference from Delaunay: some points are **redundant**, above the lower hull, in no triangle. A
+triangulation algorithm has to leave them out, and flips can't remove a vertex.
+
+## The incremental version, the source of truth
+
+[weighted_incremental.py](weighted_incremental.py) follows Edelsbrunner and Shah, *Incremental topological
+flipping works for regular triangulations* (1996):
+
+- **Corners at infinity**, as in part 2, lifted onto the paraboloid, |centre + λu|², which puts them above
+  every face of the points' lower hull. The plane test is a polynomial in λ like the circle test, with
+  heights in place of x² + y², again measured from a real point so leading terms don't cancel.
+- **Insertion.** A point on or above the plane of the triangle it falls in is redundant, and stays so: more
+  points only lower the hull. Otherwise it splits the triangle and its link edges are checked.
+- **Flips.** An illegal link edge is flipped two to two when its quadrilateral is convex. When a reflex
+  corner has just three triangles, they become one and the corner's point is redundant: the three to one
+  flip. Any other reflex corner is left; flips of its other link edges bring it to three triangles.
+- `convex_hull_3d()` glues the lower hull of z, its faces turned to face down, to the lower hull of −z.
+
+**Testing**, by brute force on 1500 sets of up to 69 points, uniform, thin and ring shaped:
+
+- With heights x² + y², exactly the Delaunay triangulation, nothing redundant.
+- With random weights, and with random heights: no point, redundant ones included, clearly below any
+  triangle's plane; triangles all counterclockwise, 2m − h − 2 of them for m vertices; their area equal to
+  the outline's; the vertices exactly the points not marked redundant. 45 595 points were redundant,
+  17 486 of them removed later by three to one flips.
+- 400 3D point sets: every point on the inner side of every hull face, every edge in exactly two faces,
+  and F = 2V − 4.
+
+It passed on the first full run. The picture shows the lower and upper hulls from above, redundant points
+hollow, and the hull in 3D with the outline in red.
+
+## The divide and conquer version
+
+[weighted_divide_and_conquer.py](weighted_divide_and_conquer.py) keeps the recursion and the zip of part 1;
+the flips test the lifted plane.
+
+**First attempt: flips only.** Two to two and three to one, and a retry of every illegal edge after each
+merge, for edges that later flips might free. It matched the incremental version on 900 sets, then got
+stuck on a harder 2000: 21% of sets with heights on a dome, −(x² + y²), where every point inside the outline
+is redundant, and 2% to 5% of the others (heavy weights, 3D heights, a saddle). An illegal edge with a
+reflex corner of more than three triangles could not be flipped, and nothing would free it. Unlike an
+insertion, a merge has no new point whose link guarantees progress. The literature knows the problem:
+flipping alone finds Delaunay triangulations in 2D, but not regular ones, nor Delaunay in 3D.
+
+**The fix: a stuck edge proves its corner redundant.** Take an illegal edge a–b between triangles a, b, c
+and b, a, d, reflex at a, so a lies inside triangle c, b, d seen from above. Among those four points,
+either a is below the plane of c, b, d, and their lower hull is the three triangles around a, making d
+above the plane of a, b, c and the edge legal; or a is on or above it, redundant among the four, and so
+among all points. So the merge removes a, however many triangles surround it, cuts its star-shaped hole
+into triangles ear by ear (the ear with the highest plane over a first), and keeps flipping. The three to
+one flip is the case of three triangles. It ends: every removal leaves a point fewer, and flips on a fixed
+set of points end. A point on the zip's open edge has no closed hole yet; its edge is deferred and retried
+after the zip. In the tests no retry was ever needed.
+
+With removal, the merge matched the incremental version, triangles and redundant points, on all 2000 hard
+sets (dome, heavy weights, 3D heights, saddle; uniform, thin and ring shaped; up to 300 points) and 900
+easier ones.
+
+**Speed bugs.** The first retry pass rechecked every edge of the whole triangulation after every merge,
+which is quadratic: 74% of the time at 5000 points, for retries that never found anything. Only deferred
+edges can still be illegal after the zip, since every other edge the flips met was legal or was queued
+again when its triangles changed, so only those are retried now. Finding a removed point's first neighbour
+scanned every edge too; each vertex now keeps one edge, as the incremental class does.
+
+## Benchmark at 100 000 points
+
+Uniform random points, one run each, pure Python, ±10% noise; every pair of results compared equal.
+
+| 100 000 points | Divide and conquer | Incremental |
+|---|---|---|
+| Heights z in a cube: lower hull, 182 triangles, 99 891 points redundant | weighted 14.6 s | weighted 11.7 s |
+| Heights x² + y²: Delaunay, 199 964 triangles, nothing redundant | plain 8.3 s, weighted 10.0 s | plain 100.5 s, weighted 99.5 s |
+
+- **On the lower hull** the incremental version leaves almost every point out on arrival: only 317 were ever
+  inserted and later removed. Its walks are short, about 19 steps per point, since the triangulation
+  never has more than about a hundred vertices. Divide and conquer triangulates every point and removes
+  99 891 of them in the merges, with 224 000 flips, yet finishes within about 25%.
+- **On Delaunay** divide and conquer is 10 times faster: the incremental walk from a corner averages 237
+  steps a point, growing like √n. The weighted plane test costs divide and conquer 20% over the circle
+  test, with the same 137 140 flips.
+
+# Part 7: what the literature already has
+
+A search for prior work on divide and conquer weighted Delaunay triangulation:
+
+- **Imai, Iri and Murota, *Voronoi diagram in the Laguerre geometry and its applications*, SIAM J. Comput.
+  14(1), 1985.** Divide and conquer for the power diagram, the dual of the weighted Delaunay triangulation,
+  in O(n log n). The points are split by sorted x, and the merge traces the dividing polygonal line between
+  the halves' diagrams, Shamos and Hoey style, discarding what lies beyond it. Circles with empty cells,
+  their "trivial" circles, are this script's redundant points. Their Lemma 3: a corner of the outline always
+  has a nonempty, unbounded cell, while a point elsewhere on the outline, or inside it, may have an empty
+  one. Their Lemma 7 handles a degenerate case in finding the dividing line's first ray. Since the merge
+  keeps only each half's part of the diagram on its own side of the dividing line, a circle whose whole
+  cell lies beyond the line drops out: the dual of removing a redundant point.
+- **Preparata and Hong, *Convex hulls of finite sets of points in two and three dimensions*, CACM 20(2),
+  1977.** Divide and conquer 3D convex hulls in O(n log n), merging two separated hulls by wrapping a band of
+  faces between them. Its lower half is a weighted Delaunay triangulation, so this too builds one.
+- **Aurenhammer, *Power diagrams: properties, algorithms and applications*, SIAM J. Comput. 16(1), 1987**,
+  the standard reference, building power diagrams through the lifting map and a convex hull one dimension
+  up.
+- **Edelsbrunner and Shah, 1996**, the incremental version here.
+- **Flips and redundant points.** The literature says flipping every illegal edge finds a 2D Delaunay
+  triangulation, but not a regular one, which agrees with the first attempt getting stuck. Vertex removal
+  from Delaunay and regular triangulations is well studied, e.g. Devillers, *On deletion in Delaunay
+  triangulations* (1999), and Devillers and Teillaud on regular 3D triangulations. Flip-based divide and
+  conquer for plain Delaunay exists too, e.g. a 2011 variant that flips instead of deleting edges, so that a
+  plain array can hold the triangulation.
+
+**So, is the weighted divide and conquer novel?** Not as an algorithm: divide and conquer in O(n log n) for
+this problem dates from 1985 for power diagrams, and from 1977 for 3D convex hulls. What I did not find
+written down is this particular merge: zip, then flip, and remove a redundant point whenever an illegal edge
+is reflex at it, on the strength of the four-point argument above. That argument is elementary, and likely
+folklore among people who work on regular triangulations; a few searches proving nothing were found is not
+proof of absence. As research it would need what the scripts don't have: a bound on the merge's work,
+since a removal re-triangulates a hole ear by ear and flips can spread; exact predicates; and degenerate
+inputs. It is a sound, tested, teaching-sized way to get regular triangulations from the familiar Delaunay
+merge, with an incremental version to check it against.
+
 # Open threads
 
-- **Commit the checks and the benchmark.** The property checks, the comparison between the two
-  versions, and the benchmark live only in a scratch folder.
+- **Commit the checks and the benchmarks.** The property checks, the comparisons between versions, and
+  the benchmarks live only in a scratch folder.
+- **The weighted merge's cost.** A bound on flips and removals per merge, and whether an ear order makes
+  the hole's triangulation regular at once, as Devillers' order does for Delaunay deletion.
+- **3D hull on the page.** Draw the true 3D convex hull in the box projections page, faces between the
+  coloured silhouettes, from a JavaScript port of the weighted triangulation.
 - **Shorter walks.** Insert in spatial order and walk from the last point, as the benchmark's sorted
   variant does. Combined with randomness (BRIO, biased randomised insertion order), that keeps walks
   short without sorted order's bad cases.
