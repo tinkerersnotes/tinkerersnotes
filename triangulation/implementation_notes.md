@@ -496,6 +496,27 @@ vertices, slightly perturbed, and p = (0.4, 0.4, 0.4): p is a hull vertex, outsi
 x + y + z = 1, but every projection puts it inside the diamond. Yes, from one projection, with weights,
 which led to part 6.
 
+**Later: the hull itself on the page.** After part 6, [weighted_delaunay.js](weighted_delaunay.js) ports the
+weighted divide and conquer merge to JavaScript on top of delaunay.js. Its constructor takes a subclass's
+fields first, since a JavaScript subclass can't set its own before its parent's constructor builds the
+triangulation. It matches weighted_incremental.py on 900 sets, domes among them; a 500-point hull takes
+4.2 ms. The page then changed:
+
+- **The hull is drawn** in facets far to near, tinted mostly white with the projection colours weighted
+  by the way each faces: up or down like xOy, along x like yOz, along y like zOx. Its opacity slider goes
+  from 0 to 1 and starts at 0.75.
+- **The box moved out to 0.6 from the planes**, so their drawings don't hide the hull; the planes reach
+  out to 1.6 to take the box's shadows, and the camera fits the whole scene.
+- **Each plane shows the side of the hull facing it**: the weighted triangulation of its projection,
+  heights the distance from the plane. All its triangles are hull faces, and its outline is the
+  projection's convex hull. It stands out from the wall by half its height, short of the box, or lies
+  flat with "in relief" off; the points behind it are faint and flat.
+- **Checkboxes** show the points, the coordinate planes, the hull and the projections' hull edges. They
+  open with the points and the hull edges off.
+- **The flat panels below the scene went**, and with them the plain Delaunay triangulations: the
+  projections' hull edges now come from the weighted triangulations' outlines, the same convex hulls.
+- **The title** became "A 3D convex hull and its projections", leading with the hull.
+
 # Part 6: weighted Delaunay triangulations and the 3D convex hull
 
 A Delaunay triangulation is already a convex hull: lift each point to (x, y, x² + y²), and the lower hull's
@@ -554,7 +575,8 @@ and b, a, d, reflex at a, so a lies inside triangle c, b, d seen from above. Amo
 either a is below the plane of c, b, d, and their lower hull is the three triangles around a, making d
 above the plane of a, b, c and the edge legal; or a is on or above it, redundant among the four, and so
 among all points. So the merge removes a, however many triangles surround it, cuts its star-shaped hole
-into triangles ear by ear (the ear with the highest plane over a first), and keeps flipping. The three to
+into triangles ear by ear (the ear with the lowest plane over a first; see the merge's cost below), and
+keeps flipping. The three to
 one flip is the case of three triangles. It ends: every removal leaves a point fewer, and flips on a fixed
 set of points end. A point on the zip's open edge has no closed hole yet; its edge is deferred and retried
 after the zip. In the tests no retry was ever needed.
@@ -585,6 +607,81 @@ Uniform random points, one run each, pure Python, ±10% noise; every pair of res
 - **On Delaunay** divide and conquer is 10 times faster: the incremental walk from a corner averages 237
   steps a point, growing like √n. The weighted plane test costs divide and conquer 20% over the circle
   test, with the same 137 140 flips.
+
+## The merge's cost
+
+A merge of m points does linear work in its bridge walks and its zip. The rest is flips and removals.
+
+**What can be proven, crudely:**
+
+- **Plain Delaunay merge:** a flip replaces two triangles by the two below them in the lifted picture, so
+  the surface only goes down, and an edge once flipped away never comes back. At most one flip per pair
+  of points: O(m²) per merge.
+- **Weighted merge:** each point is removed at most once, so at most m removals. Between two removals the
+  point set is fixed, and the same argument gives O(m²) flips. But a removal can raise the surface
+  locally: the removed point is above the lower hull of its neighbours, so its fan of triangles is above
+  that hull, yet a triangulation of the hole needn't be below the fan everywhere. So the argument doesn't
+  carry across removals, and the crude bound is O(m³) flips per merge, plus O(k³) per removal for the ear
+  search over a hole of k corners.
+
+**What happens.** Every merge of at least 64 points was measured on 1000 and 10 000 points in seven
+families: plain Delaunay, weights, 3D heights, the dome, and three tries at a bad case, two tilted planes
+meeting at the split, a ridge across the split, and rare deep needles.
+
+| | Per merge, most flips per point | on average | Most removals per point | Largest hole | Flips per point in all |
+|---|---|---|---|---|---|
+| Plain Delaunay | 0.32 | 0.15 | 0 | none | 1.3 |
+| Weighted, the six others | 0.25 to 0.55 | 0.13 to 0.21 | 0.13 to 0.25 | 9 to 16 corners | 1.9 to 2.2 |
+
+Flips per merge stay a small multiple of m, and the totals barely grow from 1000 to 10 000 points, so in
+practice the merge looks linear and the whole O(n log n). None of the adversarial families did worse.
+
+**The hole's ears.** A first guess took Devillers' order for deleting a Delaunay vertex, the ear with the
+highest plane over the removed point first. But Devillers' point is below its neighbours' circles, and a
+redundant point is above its neighbours' planes. On 5000 points:
+
+| Ear order | Diagonals illegal at once, 3D heights | Flips, 3D heights | Flips, dome | Flips, weights |
+|---|---|---|---|---|
+| Highest plane over the point | 2726 of 3343 | 10 990 | 10 036 | 11 030 |
+| Lowest plane over the point | 1306 of 3369 | 9002 | 9129 | 9214 |
+| No hole corner below, else highest | 1570 of 3232 | 9389 | 9341 | 9462 |
+
+The lowest plane first needs about 17% fewer flips, so the scripts and weighted_delaunay.js use it now;
+every order gives the same final result. Even the third order leaves about half the diagonals illegal:
+often no triangulation of the hole that keeps all its corners can be regular, because some of those
+corners are redundant themselves and go later. So the hole can't be made regular at once in general.
+
+**An attempt at the O(m²) bound.** With a hole triangulation that never raises the surface, an edge once gone
+would never come back across removals either, and a merge would be O(m²) like the plain one. Small
+random holes, with v inside a ring of 4 to 8 corners, tested whether such a triangulation exists. The
+check tried every triangulation of the hole. Two piecewise linear surfaces compare at v and where the
+hole's diagonals cross the fan's spokes, so those points suffice.
+
+- **Being redundant isn't enough.** With v anywhere above its ring's lower hull, 31 of 400 holes of 4
+  corners had no triangulation below the fan, and over half of those with 8.
+- **Nor is the merge's own trigger.** With v inside the triangle of a corner and its two neighbours, and
+  above its plane, as a removal in the merge requires: 39 of 400 holes of 4 corners, and similar shares
+  for more corners. A worked example: v at height −1.28 inside x₀ at −2.55, x₁ at −0.89, x₂ at +1.54,
+  x₃ at −0.68. v lies inside triangle x₃, x₀, x₁ and above its plane. But the ring bends inwards at x₂, so
+  the only triangulation uses x₀–x₂, whose triangles are above v. The lowest surface would use x₁–x₃,
+  outside the hole; and x₂ is redundant itself, above triangle x₀, x₁, x₃.
+- **That is always the obstruction.** In all 335 holes of 4 to 7 corners without a triangulation below the
+  fan, some corner bending inwards was redundant among the ring and v.
+- **And flipping finds the good cases.** Whenever some triangulation lay below the fan, flips at v that each
+  lower the surface took v down to three neighbours, for a last 3-to-1 flip: always in thousands of holes.
+  The lowest-plane ear order found such a triangulation in all but a few of those.
+
+There is a partial explanation. In a hole with no redundant corner, an illegal edge that can't be flipped is
+reflex at one end, and by the four-point argument that end is redundant, so it can only be v. What remains to
+prove is that a redundant v of more than three neighbours then always has a lowering flip. The
+experiments say yes, but this is not a proof.
+
+So the surface can't always go down: removing a point sometimes has to wait for a redundant neighbour to go
+first. A removal order that clears such neighbours first would restore the O(m²) bound, if one always exists.
+Clusters of adjacent redundant points, as on the dome, are where it might not. **Still open:** that order,
+or a different merge. Guibas and Stolfi's wrapping merge, the primal of Imai, Iri and Murota's dividing
+chain, is linear by construction and would give O(n log n) outright. Meanwhile the proven bound stays
+O(m³) per merge, and the measured work about 0.2 flips per point.
 
 # Part 7: what the literature already has
 
@@ -627,10 +724,9 @@ merge, with an incremental version to check it against.
 
 - **Commit the checks and the benchmarks.** The property checks, the comparisons between versions, and
   the benchmarks live only in a scratch folder.
-- **The weighted merge's cost.** A bound on flips and removals per merge, and whether an ear order makes
-  the hole's triangulation regular at once, as Devillers' order does for Delaunay deletion.
-- **3D hull on the page.** Draw the true 3D convex hull in the box projections page, faces between the
-  coloured silhouettes, from a JavaScript port of the weighted triangulation.
+- **The weighted merge's cost.** Removals can't always keep the lifted surface going down: a hole's
+  redundant corner may have to go first. An order of removals that always allows it would bound a merge by
+  O(m²); a weighted Guibas–Stolfi wrapping merge would be linear by construction. See part 6.
 - **Shorter walks.** Insert in spatial order and walk from the last point, as the benchmark's sorted
   variant does. Combined with randomness (BRIO, biased randomised insertion order), that keeps walks
   short without sorted order's bad cases.
