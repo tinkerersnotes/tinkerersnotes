@@ -1,7 +1,7 @@
 <!doctype html>
-<!-- Points moving in a 3D box: their convex hull, from two weighted Delaunay triangulations in
-     weighted_delaunay.js, and their projections onto the coordinate planes xOy, yOz and zOx,
-     triangulated by delaunay.js. Opens straight from disk, next to both scripts. -->
+<!-- Points moving in a 3D box: their convex hull, from two weighted Delaunay triangulations, and on each
+     coordinate plane, xOy, yOz and zOx, the hull's side facing it, another weighted triangulation. They
+     come from weighted_delaunay.js, built on delaunay.js. Opens straight from disk, next to both. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -96,22 +96,9 @@
   }
   #scene { height: min(62vh, 70vw); cursor: grab; touch-action: none; }
   #scene.dragging { cursor: grabbing; }
-  .planes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
-  .planes canvas { aspect-ratio: 1; height: auto; }
-  .planes figure { margin: 0; }
-  /* One line each, so changing numbers never move the panels */
-  .planes figcaption {
-    margin-top: 4px;
-    font-size: 0.9rem;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .xy { color: var(--xy-text); }
   .yz { color: var(--yz-text); }
   .zx { color: var(--zx-text); }
-  @media (max-width: 560px) { .planes { grid-template-columns: 1fr; } }
   /* One line under the scene, so changing numbers never move it */
   #status {
     margin: 8px 0 0;
@@ -132,9 +119,8 @@
     hull's lower half, with heights −z its upper half. Its facets are tinted by the plane they face. Each
     coordinate plane, <span class="xy">xOy</span> on the floor, <span class="yz">yOz</span> and
     <span class="zx">zOx</span> on the walls behind, shows the side of the hull facing it: the weighted
-    triangulation of the projection, heights the distance from the plane, in relief or flat. The panels
-    below show the plain Delaunay triangulations of the projections, edges that aren't hull edges faded.
-    Each projection's outline is a silhouette of the hull, and its edges can be drawn between the points in
+    triangulation of the projection, heights the distance from the plane, in relief or flat. Each
+    projection's outline is a silhouette of the hull, and its edges can be drawn between the points in
     the box too, mixing colours as light does where outlines share an edge. Drag to turn the box.</p>
 
   <div class="controls">
@@ -158,14 +144,6 @@
   <canvas id="scene" aria-label="Points in a box with their projections"></canvas>
   <p id="status">&nbsp;</p>
 
-  <div class="planes">
-    <figure><canvas id="plane-xy" aria-label="Projection onto xOy"></canvas>
-      <figcaption class="xy" id="caption-xy">xOy</figcaption></figure>
-    <figure><canvas id="plane-yz" aria-label="Projection onto yOz"></canvas>
-      <figcaption class="yz" id="caption-yz">yOz</figcaption></figure>
-    <figure><canvas id="plane-zx" aria-label="Projection onto zOx"></canvas>
-      <figcaption class="zx" id="caption-zx">zOx</figcaption></figure>
-  </div>
 </main>
 
 <script src="delaunay.js"></script>
@@ -187,17 +165,12 @@ const showSilhouettes = document.getElementById('show-silhouettes');
 const hullOpacity = document.getElementById('hull-opacity');
 const hullOpacityValue = document.getElementById('hull-opacity-value');
 let hull3d = null;  // The points' 3D convex hull: {faces, lower, upper}
-let hullEdges = null;  // Its edges, as smaller end * count + larger end
 
 // The points' box sits GAP away from the coordinate planes in every direction, so the projections on
 // them stay clear of the hull; the planes reach out to SCENE to cover the box's shadows
 const GAP = 0.6, SCENE = 1 + GAP;
 const world = i => [GAP + X[i], GAP + Y[i], GAP + Z[i]];
 
-function onHull(a, b) {
-  // Is the edge between points a and b on the 3D hull? Without a hull this frame, take every edge as on it
-  return !hullEdges || hullEdges.has(Math.min(a, b) * count + Math.max(a, b));
-}
 
 const capacity = Number(countInput.max);
 // Positions in the unit box, velocities in box sizes per second
@@ -209,16 +182,11 @@ let count = 0, dirty = true, skipped = 0, averageMs = 0, shared = 0;
 // the plane lies in the box (the coordinate left out, w, is 0 there; place(u, v, w) puts a point w out
 // from the plane)
 const projections = [
-  {name: 'xy', label: 'xOy', u: X, v: Y, w: Z, axes: ['x', 'y'], place: (u, v, w = 0) => [u, v, w]},
-  {name: 'yz', label: 'yOz', u: Y, v: Z, w: X, axes: ['y', 'z'], place: (u, v, w = 0) => [w, u, v]},
-  {name: 'zx', label: 'zOx', u: Z, v: X, w: Y, axes: ['z', 'x'], place: (u, v, w = 0) => [v, w, u]},
+  {name: 'xy', u: X, v: Y, w: Z, place: (u, v, w = 0) => [u, v, w]},
+  {name: 'yz', u: Y, v: Z, w: X, place: (u, v, w = 0) => [w, u, v]},
+  {name: 'zx', u: Z, v: X, w: Y, place: (u, v, w = 0) => [v, w, u]},
 ];
-for (const p of projections) {
-  p.canvas = document.getElementById(`plane-${p.name}`);
-  p.context = p.canvas.getContext('2d');
-  p.caption = document.getElementById(`caption-${p.name}`);
-  p.triangulation = null;
-}
+for (const p of projections) p.weighted = null;
 
 function randomPoint(i) {
   // Uniform in the box, moving with a speed and direction of its own: uniform on the sphere
@@ -259,27 +227,17 @@ function move(seconds) {
 
 function triangulate() {
   const start = performance.now();
-  for (const p of projections) {
-    try {
-      p.triangulation = new Triangulation(p.u.subarray(0, count), p.v.subarray(0, count), count);
-    } catch (error) {
-      // A degenerate moment (points in line on this plane): skip this frame's triangles
-      p.triangulation = null;
-      skipped++;
-    }
-  }
   // The 3D convex hull: the lower and upper hulls are weighted Delaunay triangulations of the xOy
   // projection, with heights z and -z
   try {
     hull3d = convexHull3d(X.subarray(0, count), Y.subarray(0, count), Z.subarray(0, count), count);
-    hullEdges = new Set(hull3d.faces.flatMap(([a, b, c]) =>
-      [[a, b], [b, c], [c, a]].map(([p, q]) => Math.min(p, q) * count + Math.max(p, q))));
   } catch (error) {
-    hull3d = hullEdges = null;
+    hull3d = null;
     skipped++;
   }
   // On each coordinate plane, the side of the hull facing it: the weighted Delaunay triangulation of the
-  // projection, heights the distance from the plane. For xOy that is the hull's lower half.
+  // projection, heights the distance from the plane. For xOy that is the hull's lower half. Its outline
+  // is the projection's convex hull, a silhouette of the 3D hull.
   for (const p of projections) {
     try {
       p.weighted = p.name === 'xy' && hull3d ? hull3d.lower
@@ -509,8 +467,8 @@ function drawScene() {
   // the 3D hull. An edge on more than one projection's hull is drawn once, in a blend of their colours.
   const owners = new Map();  // Edge, as smaller end * count + larger end -> bit per projection
   projections.forEach((p, k) => {
-    if (!p.triangulation) return;
-    for (const [a, b] of hullEdgesOf(p.triangulation)) {
+    if (!p.weighted) return;
+    for (const [a, b] of hullEdgesOf(p.weighted)) {
       const key = Math.min(a, b) * count + Math.max(a, b);
       owners.set(key, (owners.get(key) || 0) | (1 << k));
     }
@@ -566,55 +524,6 @@ function facetColour([nx, ny, nz]) {
   return `rgb(${mix.map(c => Math.round(0.45 * c + 0.55 * 255)).join(' ')})`;
 }
 
-function drawPlane(p) {
-  // A projection flat: the unit square with its horizontal axis to the right and vertical one up
-  const [width, height] = fit(p.canvas);
-  const context = p.context, colour = palette[p.name];
-  const margin = 22, size = Math.min(width, height) - 2 * margin;
-  const at = i => [margin + p.u[i] * size, margin + (1 - p.v[i]) * size];
-  context.fillStyle = palette.surface;
-  context.fillRect(0, 0, width, height);
-  context.strokeStyle = palette.box;
-  context.lineWidth = 1;
-  context.strokeRect(margin, margin, size, size);
-  context.fillStyle = palette.text;
-  context.font = '12px system-ui, sans-serif';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.fillText(p.axes[0], margin + size / 2, margin + size + 12);
-  context.fillText(p.axes[1], margin - 12, margin + size / 2);
-
-  const t = p.triangulation;
-  if (t) {
-    // Edges that aren't edges of the 3D hull faded, those that are in the projection's colour
-    context.strokeStyle = colour;
-    context.lineWidth = 1;
-    for (const [alpha, wanted] of [[0.15, false], [0.5, true]]) {
-      context.globalAlpha = alpha;
-      context.beginPath();
-      for (const [a, b] of edgesOf(t)) if (onHull(a, b) === wanted) line(context, at(a), at(b));
-      context.stroke();
-    }
-    context.globalAlpha = 1;
-    context.lineWidth = 2.5;
-    context.lineJoin = 'round';
-    context.beginPath();
-    for (const [a, b] of hullEdgesOf(t)) line(context, at(a), at(b));
-    context.stroke();
-  }
-  context.fillStyle = colour;
-  context.beginPath();
-  for (let i = 0; i < count; i++) {
-    const [sx, sy] = at(i);
-    context.moveTo(sx + 3, sy);
-    context.arc(sx, sy, 3, 0, 2 * Math.PI);
-  }
-  context.fill();
-  p.caption.textContent = t
-    ? `${p.label} · ${t.apex.size / 3} triangles · hull of ${t.hull.length}`
-    : `${p.label}: triangulation skipped this frame`;
-}
-
 let last = performance.now(), dragging = null;
 function frame(now) {
   const seconds = Math.min((now - last) / 1000, 0.05);  // A hidden tab must not teleport points
@@ -627,7 +536,6 @@ function frame(now) {
   if (dirty) {
     triangulate();
     drawScene();
-    for (const p of projections) drawPlane(p);
     status.textContent = `${count} points`
       + (hull3d ? ` · convex hull of ${hull3d.faces.length} faces, ${new Set(hull3d.faces.flat()).size} vertices` : '')
       + ` · ${shared} hull edges shared between projections`
