@@ -1,6 +1,7 @@
 <!doctype html>
-<!-- Delaunay triangulation of points bouncing around a box, rebuilt every frame with the divide and
-     conquer algorithm of divide_and_conquer.py, ported to JavaScript. Opens straight from disk. -->
+<!-- Delaunay triangulation and Voronoi diagram of points moving around a box, rebuilt every frame
+     with the divide and conquer algorithm of divide_and_conquer.py, ported to JavaScript. The points
+     drift and bounce, or repel each other. Opens straight from disk. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -18,6 +19,7 @@
     --edge: #a3a19b;
     --hull: #0b0b0b;
     --point: #2a78d6;
+    --voronoi: #e8590c;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -31,6 +33,7 @@
       --edge: #5f5e5a;
       --hull: #f0efec;
       --point: #5aa0f0;
+      --voronoi: #ff8a3d;
     }
   }
   * { box-sizing: border-box; }
@@ -57,7 +60,14 @@
   .controls label { display: flex; align-items: center; gap: 8px; }
   #count { width: min(320px, 50vw); accent-color: var(--accent); }
   #count-value { min-width: 4ch; font-variant-numeric: tabular-nums; }
-  #play { accent-color: var(--accent); width: 18px; height: 18px; }
+  .controls input[type=checkbox], .controls input[type=radio] {
+    accent-color: var(--accent);
+    width: 18px;
+    height: 18px;
+    margin: 0;
+  }
+  .group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .group-name { color: var(--text-secondary); }
   button {
     font: inherit;
     padding: 4px 14px;
@@ -91,16 +101,32 @@
 <body>
 <main>
   <h1>Moving Delaunay triangulation</h1>
-  <p class="lede">Points bounce around the box, each with the speed and direction it got at the start. Every
-    frame, a divide and conquer algorithm triangulates them from scratch. It splits them by a line through their
-    centre of mass, joins the halves' convex hulls by their two bridges, and flips edges until every triangle's
-    circumcircle is empty.</p>
+  <p class="lede">Every frame, a divide and conquer algorithm triangulates the points from scratch. It splits
+    them by a line through their centre of mass, joins the halves' convex hulls by their two bridges, and flips
+    edges until every triangle's circumcircle is empty. Joining the circumcircles' centres across each edge
+    gives the dual, the Voronoi diagram; a hull edge gets a short stump outwards in place of its ray to
+    infinity. The points drift and bounce off the walls, each with the speed and direction it got at the
+    start, or repel each other with an acceleration falling off with the square of their distance, slowed by
+    friction until they come to rest.</p>
 
   <div class="controls">
-    <label>Points <input id="count" type="range" min="3" max="2000" step="1" value="150">
-      <output id="count-value" for="count">150</output></label>
-    <label><input id="play" type="checkbox" checked> Play</label>
-    <button id="reset" type="button">Reset</button>
+    <div class="group">
+      <label>Points <input id="count" type="range" min="3" max="2000" step="1" value="150">
+        <output id="count-value" for="count">150</output></label>
+      <label><input id="play" type="checkbox" checked> Play</label>
+      <button id="reset" type="button">Reset</button>
+    </div>
+    <div class="group" role="radiogroup" aria-label="Motion">
+      <span class="group-name">Motion</span>
+      <label><input type="radio" name="motion" value="drift" checked> Drift and bounce</label>
+      <label><input type="radio" name="motion" value="repel"> Repel, up to 50 points</label>
+    </div>
+    <div class="group">
+      <span class="group-name">Show</span>
+      <label><input id="show-delaunay" type="checkbox" checked> Delaunay</label>
+      <label><input id="show-voronoi" type="checkbox" checked> Voronoi</label>
+      <label><input id="own-colours" type="checkbox"> Own colours</label>
+    </div>
   </div>
 
   <canvas id="scene" aria-label="Triangulation of moving points"></canvas>
@@ -314,6 +340,40 @@ class Triangulation {
     // Joined hull: right's bottom, the high bridge, left's top, the low bridge
     return [...walk(right, rLow, rHigh, 1), ...walk(left, lHigh, lLow, 1)];
   }
+
+  circumcentre(a, b, c) {
+    // Measured from a, which keeps the numbers small
+    const x = this.x, y = this.y;
+    const bx = x[b] - x[a], by = y[b] - y[a], cx = x[c] - x[a], cy = y[c] - y[a];
+    const b2 = bx * bx + by * by, c2 = cx * cx + cy * cy, d = 2 * (bx * cy - by * cx);
+    return [x[a] + (cy * b2 - by * c2) / d, y[a] + (bx * c2 - cx * b2) / d];
+  }
+
+  voronoi(stump) {
+    // The dual of the triangulation, one edge for each of its edges, as [x1, y1, x2, y2] segments.
+    // Across an inner edge, the circumcentres of its two triangles are joined. A hull edge's dual
+    // is a ray outwards from its triangle's circumcentre, along the edge's outward normal, through
+    // the edge's midpoint, since circumcentres lie on every edge's perpendicular bisector. It ends
+    // at a virtual vertex stump past the hull edge, or past the circumcentre if that is already
+    // outside.
+    const n = this.n, x = this.x, y = this.y, edges = [], stumps = [];
+    for (const [key, c] of this.apex) {
+      const a = Math.floor(key / n), b = key - a * n;
+      const d = this.getApex(b, a);
+      if (d >= 0) {
+        if (a < b) edges.push([...this.circumcentre(a, b, c), ...this.circumcentre(b, a, d)]);
+        continue;
+      }
+      const [ux, uy] = this.circumcentre(a, b, c);
+      // The triangle is on the left of a -> b, the outside on the right
+      const length = Math.hypot(x[b] - x[a], y[b] - y[a]);
+      const nx = (y[b] - y[a]) / length, ny = -(x[b] - x[a]) / length;
+      const mx = (x[a] + x[b]) / 2, my = (y[a] + y[b]) / 2;
+      const beyond = Math.max((ux - mx) * nx + (uy - my) * ny, 0) + stump;
+      stumps.push([ux, uy, mx + beyond * nx, my + beyond * ny]);
+    }
+    return {edges, stumps};
+  }
 }
 
 function walk(hull, start, stop, step) {
@@ -334,23 +394,34 @@ const context = canvas.getContext('2d');
 const countInput = document.getElementById('count');
 const countValue = document.getElementById('count-value');
 const playInput = document.getElementById('play');
+const showDelaunay = document.getElementById('show-delaunay');
+const showVoronoi = document.getElementById('show-voronoi');
+const ownColours = document.getElementById('own-colours');
 const status = document.getElementById('status');
 
 const capacity = Number(countInput.max);
-// Positions and velocities in CSS pixels, per second
+const REPEL_LIMIT = 50;  // Repelling, every point pushes every other: n² work per step
+// Repelling: acceleration REPULSION L³ / d², L the box's shorter side, softened within SOFTENING L so
+// a near miss can't fling points away, and friction slowing every point by FRICTION of its speed per
+// second, so speeds stay bounded. Simulated, points start about as fast as drifting ones and come
+// to rest within half a minute, about two thirds of them pressed towards the walls.
+const REPULSION = 3e-4, SOFTENING = 0.02, FRICTION = 0.5, STEP = 1 / 240;
+// Positions and velocities in CSS pixels, per second, and each point's own colour
 const px = new Float64Array(capacity), py = new Float64Array(capacity);
 const vx = new Float64Array(capacity), vy = new Float64Array(capacity);
-let count = 0, width = 0, height = 0;
+const colour = new Array(capacity);
+let count = 0, width = 0, height = 0, motion = 'drift';
 let triangulation = null, skipped = 0, averageMs = 0, dirty = true;
 
 function randomPoint(i) {
-  // Uniform in the box, with a speed and direction fixed from now on
+  // Uniform in the box, with a speed, a direction and a colour of its own
   px[i] = Math.random() * width;
   py[i] = Math.random() * height;
   const speed = (0.03 + 0.09 * Math.random()) * Math.min(width, height);
   const direction = 2 * Math.PI * Math.random();
   vx[i] = speed * Math.cos(direction);
   vy[i] = speed * Math.sin(direction);
+  colour[i] = `hsl(${Math.floor(360 * Math.random())} 80% 50%)`;
 }
 
 function setCount(n) {
@@ -384,6 +455,37 @@ function resize() {
   dirty = true;
 }
 
+function setMotion(value) {
+  motion = value;
+  // Repelling is limited to REPEL_LIMIT points; drifting gets the full range back
+  countInput.max = motion === 'repel' ? REPEL_LIMIT : capacity;
+  if (count > Number(countInput.max)) setCount(Number(countInput.max));
+  countInput.value = count;
+}
+
+function repel(seconds) {
+  // Every pair pushes apart, in steps short enough for close passes. Walls still bounce.
+  const side = Math.min(width, height), strength = REPULSION * side ** 3;
+  const soft = (SOFTENING * side) ** 2;
+  const steps = Math.ceil(seconds / STEP), dt = seconds / steps, keep = Math.exp(-FRICTION * dt);
+  for (let s = 0; s < steps; s++) {
+    for (let i = 0; i < count; i++) {
+      let ax = 0, ay = 0;
+      for (let j = 0; j < count; j++) {
+        if (j === i) continue;
+        const dx = px[i] - px[j], dy = py[i] - py[j], d2 = dx * dx + dy * dy + soft;
+        const a = strength / (d2 * Math.sqrt(d2));  // Times the distance: strength / d²
+        ax += a * dx;
+        ay += a * dy;
+      }
+      // Friction: dv/dt = a - FRICTION v, its decay taken exactly over the step
+      vx[i] = (vx[i] + ax * dt) * keep;
+      vy[i] = (vy[i] + ay * dt) * keep;
+    }
+    move(dt);
+  }
+}
+
 function move(seconds) {
   for (let i = 0; i < count; i++) {
     px[i] += vx[i] * seconds;
@@ -413,7 +515,8 @@ function triangulate() {
 function colours() {
   const style = getComputedStyle(document.documentElement);
   const get = name => style.getPropertyValue(name).trim();
-  return {surface: get('--surface'), edge: get('--edge'), hull: get('--hull'), point: get('--point')};
+  return {surface: get('--surface'), edge: get('--edge'), hull: get('--hull'), point: get('--point'),
+          voronoi: get('--voronoi')};
 }
 let palette = colours();
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -424,22 +527,49 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 function draw() {
   context.fillStyle = palette.surface;
   context.fillRect(0, 0, width, height);
-  const t = triangulation;
-  if (t) {
-    // Every edge once: from its smaller end, or from either end on the hull
+  const t = triangulation, colourful = ownColours.checked;
+  let voronoi = null;
+  if (t && showDelaunay.checked) {
+    // Every edge once: from its smaller end, or from either end on the hull. In own colours, each
+    // edge fades from one end's colour to the other's, so it is stroked on its own.
     const n = t.n;
-    context.beginPath();
+    context.lineWidth = 1;
+    if (!colourful) context.beginPath();
     for (const key of t.apex.keys()) {
       const a = Math.floor(key / n), b = key - a * n;
       if (a < b || !t.apex.has(b * n + a)) {
+        if (colourful) {
+          const gradient = context.createLinearGradient(px[a], py[a], px[b], py[b]);
+          gradient.addColorStop(0, colour[a]);
+          gradient.addColorStop(1, colour[b]);
+          context.strokeStyle = gradient;
+          context.beginPath();
+        }
         context.moveTo(px[a], py[a]);
         context.lineTo(px[b], py[b]);
+        if (colourful) context.stroke();
       }
     }
-    context.strokeStyle = palette.edge;
-    context.lineWidth = 1;
+    if (!colourful) {
+      context.strokeStyle = palette.edge;
+      context.stroke();
+    }
+  }
+  if (t && showVoronoi.checked) {
+    voronoi = t.voronoi(0.04 * Math.min(width, height));
+    context.strokeStyle = palette.voronoi;
+    context.lineWidth = 1.2;
+    context.beginPath();
+    for (const [x1, y1, x2, y2] of voronoi.edges) { context.moveTo(x1, y1); context.lineTo(x2, y2); }
     context.stroke();
-
+    // Stumps dashed: each stands in for a ray to infinity
+    context.setLineDash([3, 3]);
+    context.beginPath();
+    for (const [x1, y1, x2, y2] of voronoi.stumps) { context.moveTo(x1, y1); context.lineTo(x2, y2); }
+    context.stroke();
+    context.setLineDash([]);
+  }
+  if (t) {
     if (t.hull.length > 1) {
       context.beginPath();
       t.hull.forEach((v, i) => (i ? context.lineTo(px[v], py[v]) : context.moveTo(px[v], py[v])));
@@ -449,18 +579,24 @@ function draw() {
       context.stroke();
     }
   }
-  const radius = count > 800 ? 1.5 : 2.5;
+  const radius = count > 800 ? 1.5 : colourful ? 3.5 : 2.5;
   context.fillStyle = palette.point;
   context.beginPath();
   for (let i = 0; i < count; i++) {
+    if (colourful) {
+      context.fillStyle = colour[i];
+      context.beginPath();
+    }
     context.moveTo(px[i] + radius, py[i]);
     context.arc(px[i], py[i], radius, 0, 2 * Math.PI);
+    if (colourful) context.fill();
   }
-  context.fill();
+  if (!colourful) context.fill();
 
   status.textContent = t
-    ? `${count} points · ${t.apex.size / 3} triangles · hull of ${t.hull.length} · ${t.flips} flips · `
-      + `triangulated in ${averageMs.toFixed(2)} ms` + (skipped ? ` · ${skipped} degenerate frames skipped` : '')
+    ? `${count} points · ${t.apex.size / 3} triangles · hull of ${t.hull.length} · ${t.flips} flips`
+      + (voronoi ? ` · ${voronoi.edges.length + voronoi.stumps.length} Voronoi edges` : '')
+      + ` · triangulated in ${averageMs.toFixed(2)} ms` + (skipped ? ` · ${skipped} degenerate frames skipped` : '')
     : `${count} points · triangulation skipped this frame`;
 }
 
@@ -468,7 +604,7 @@ let last = performance.now();
 function frame(now) {
   const seconds = Math.min((now - last) / 1000, 0.05);  // A hidden tab must not teleport points
   last = now;
-  if (playInput.checked) move(seconds);
+  if (playInput.checked) (motion === 'repel' ? repel : move)(seconds);
   if (dirty) {
     triangulate();
     draw();
@@ -480,6 +616,10 @@ function frame(now) {
 countInput.addEventListener('input', () => setCount(Number(countInput.value)));
 playInput.addEventListener('change', () => { last = performance.now(); });
 document.getElementById('reset').addEventListener('click', reset);
+for (const radio of document.querySelectorAll('input[name=motion]')) {
+  radio.addEventListener('change', () => setMotion(radio.value));
+}
+for (const box of [showDelaunay, showVoronoi, ownColours]) box.addEventListener('change', () => { dirty = true; });
 new ResizeObserver(resize).observe(canvas);
 
 resize();

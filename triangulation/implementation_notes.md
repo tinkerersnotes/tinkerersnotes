@@ -5,8 +5,11 @@ Notes on building two Delaunay triangulations in pure Python with numpy, drawn w
 - [divide_and_conquer.py](divide_and_conquer.py), from the prompt in [triangulation.md](triangulation.md);
 - [incremental.py](incremental.py), points inserted one by one into a big virtual triangle.
 
-For each: what was built, what went wrong along the way, and how the result was tested. At the end, how
-the two compare in speed. The notebooks [divide_and_conquer.ipynb](divide_and_conquer.ipynb) and
+Both also build the dual, the Voronoi diagram. [moving_points.html](moving_points.html) runs a JavaScript port
+of the divide and conquer version on moving points, every frame, and is published on the GitHub Pages site.
+
+For each: what was built, what went wrong along the way, and how the result was tested. Then how the two
+Python versions compare in speed. The notebooks [divide_and_conquer.ipynb](divide_and_conquer.ipynb) and
 [incremental.ipynb](incremental.ipynb) run them on the same four point sets.
 
 Both share one edge store. A dictionary maps a directed edge `(a, b)` to the apex `c` of the
@@ -360,6 +363,94 @@ snake through a grid of cells, each walk starting at the previous point.
 These are pure Python timings: the ratios matter more than the seconds. Compiled, both would be far
 faster, and the gap would likely narrow, since each walk step costs a lot in Python.
 
+# Part 3: the dual, the Voronoi diagram
+
+For each triangle, take its circumcentre, and join it to the circumcentres of its up to three neighbours
+across its edges. That is the Voronoi diagram: each Delaunay edge has exactly one dual edge, perpendicular
+to it, made of the points equally far from its two ends and further from every other point. A hull edge
+has only one triangle, so its dual is a ray to infinity. As asked, it is drawn as a short stump to a virtual
+vertex outside the hull.
+
+- **`Triangulation.circumcentre(a, b, c)`**, measured from `a` to keep the numbers small.
+- **`Triangulation.voronoi(stump)`** returns the joined circumcentres for inner edges and the stumps for
+  hull edges, one entry per Delaunay edge. The incremental class borrows both methods.
+- **Where a stump goes.** A circumcentre lies on the perpendicular bisector of each of its triangle's
+  edges. So the ray for a hull edge starts at the circumcentre, runs along the edge's outward normal and
+  passes through the edge's midpoint. The stump ends `stump` past the edge's midpoint, or past the
+  circumcentre when that is already outside the hull, which happens for a triangle obtuse opposite the
+  hull edge. Either way it ends outside.
+- **Picture.** A third panel, "Dual", in both scripts, drawn by `draw_dual()` in divide_and_conquer.py. Thin
+  triangles have far away circumcentres, so the view stays on the points with a 15% margin.
+
+Points on one circle share one circumcentre. For the circle and semicircle set, the dual of each shape's
+inside collapses to one point, its centre, with the stumps radiating out like spokes. The edges counted
+there include many of zero length, between triangles sharing a centre. For the incremental version at scale 1, the
+stumps follow the dented boundary: 143 for the circle and semicircle instead of 116 hull edges.
+
+**Testing**, on 1500 random sets in the three families:
+
+- dual edges and stumps together number 3n − h − 3, one per Delaunay edge, with one stump per hull edge;
+- each circumcentre is equally far from its triangle's three corners;
+- each dual edge is perpendicular to its Delaunay edge;
+- at the middle of each dual edge, the nearest points are that edge's two ends, the Voronoi property;
+- every stump ends outside the hull.
+
+With corners at infinity, the incremental version gives the same diagram as divide and conquer.
+
+# Part 4: the moving points page
+
+[moving_points.html](moving_points.html) is a single page that opens from disk, published by the Pages
+workflow next to the seam carving demos.
+
+- **The triangulation** is the divide and conquer version ported to JavaScript, rebuilt from scratch every
+  frame, since divide and conquer has no incremental update. Points are indices into coordinate arrays.
+  A directed edge's key is `a·n + b` in a `Map`. The port keeps the relative circle test and the zip's
+  corner test, and adds guards: a walk or a flip count that runs away throws. If a frame hits a
+  degenerate case, the page skips its triangles instead of freezing, and the status line counts such
+  frames.
+- **Controls.**
+  - A points slider, 3 to 2000. Sliding keeps the moving points and adds or drops some.
+  - Play, to pause and resume, and Reset, for new uniform positions, speeds and directions.
+  - Show Delaunay and show Voronoi.
+  - Own colours, off by default: each point gets a random hue, and each Delaunay edge fades from one end's
+    colour to the other's. The Voronoi diagram stays orange.
+- **Drift and bounce.** Each point keeps the speed (3% to 12% of the box's shorter side per second) and
+  direction it got at the start. A wall reflects its position and turns its velocity around. A frame
+  advances at most 0.05 s, so a background tab doesn't make points jump.
+- **Repel, up to 50 points.** Every pair pushes apart with acceleration `k / d²`, `k = 0.0003 L³` for the
+  box's shorter side `L`, which takes n² work per step; the slider's maximum drops to 50. Distances are
+  softened within `0.02 L`, so a near miss can't fling a point away. Friction, `dv/dt = a − 0.5 v`, applied
+  as an exact decay over each 1/240 s step, keeps speeds bounded. Walls still bounce. The constants come
+  from a simulation of 50 points:
+  - Without friction, speeds stayed near the drifting ones, but nothing bounded them in principle.
+  - With friction 0.5 per second, points start about as fast as drifting ones. They slow down by about
+    10 s and come to rest by about 30 s, about two thirds of them pressed towards the walls, as
+    repelling charges in a box are.
+  - Stronger friction settles faster but leaves the start sluggish.
+
+**Testing.**
+
+- **The JavaScript port against divide_and_conquer.py**, on 1500 random sets of 1 to 119 points. The
+  Python side wrote the points and its results to JSON, and Node ran the code between the page's
+  `BEGIN triangulation` and `END triangulation` markers. Triangle sets and hulls were identical, and so
+  were the Voronoi edges and stumps: none of 245 617 segments differed after rounding to 1e-6 of the set's
+  size.
+- **The page in the browser pane:** pause, reset, the slider, the 50-point limit and its release, the
+  show checkboxes and own colours. After 20 simulated seconds of repelling, no point was outside the box
+  and no coordinate was NaN.
+- **Speed.** A triangulation takes 0.2 ms for 150 points and 4.3 ms for 2000, in Node. Drawing 2000
+  points takes about 23 ms in grey and 28 ms in own colours in the VM's browser pane, since each colour
+  gradient is its own stroke.
+
+Two traps in testing, worth knowing next time:
+
+- **A hidden browser pane gets few animation frames.** Points barely moved and the status lagged. That was
+  the pane, not the page: velocities read back right, and frames came at 41 a second once the pane was
+  shown.
+- **A screenshot can be stale.** One showed checkboxes unchecked that the page reported checked, and two
+  clicks placed from it landed on other controls. Reading the state from the page after each click, and
+  taking a fresh screenshot, settled it.
+
 # Open threads
 
 - **Commit the checks and the benchmark.** The property checks, the comparison between the two
@@ -377,4 +468,8 @@ faster, and the gap would likely narrow, since each walk step costs a lot in Pyt
   degenerate inputs; Shewchuk's adaptive predicates make them exact.
 - **Collinear points.** Degenerate leaves and ties in the bridge walk.
 - **Animation.** Showing the zip and the flips of each merge step by step, or the flip wave of each
-  insertion, would make a good talk visual.
+  insertion, would make a good talk visual. The moving points page animates the result, not the steps.
+- **Faster repulsion.** The page limits repelling to 50 points because every pair interacts. A grid of
+  cells, or a Barnes–Hut tree, would make it n log n.
+- **Voronoi cells.** The dual is drawn as edges. Filling each point's cell, in its own colour, would need
+  the cell polygons, clipped to the box at the hull.
