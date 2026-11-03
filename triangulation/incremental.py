@@ -15,7 +15,7 @@ its sign is the sign of the highest nonzero coefficient. Then the result is exac
 the convex hull as its boundary.
 
 The picture compares the result with the convex hull from divide_and_conquer.py: what the triangles
-leave of it uncovered is filled red.
+leave of it uncovered is filled red. Its third panel is the dual, the Voronoi diagram.
 
     python incremental.py [N] [--seed SEED] [--scale SCALE|inf] [--save picture.png]
 """
@@ -23,7 +23,7 @@ import argparse
 
 import numpy as np
 
-from divide_and_conquer import Triangulation, cross, inside_circle, orient
+from divide_and_conquer import Triangulation, cross, draw_dual, inside_circle, orient
 
 
 # Polynomials in λ as lists of coefficients from the constant up
@@ -51,11 +51,13 @@ def leading(p):
 
 
 class IncrementalTriangulation:
-    # Same edge store and flips as the divide and conquer version
+    # Same edge store, flips and Voronoi diagram as the divide and conquer version
     remove_triangle = Triangulation.remove_triangle
     legalize = Triangulation.legalize
     triangles = Triangulation.triangles
     illegal_edges = Triangulation.illegal_edges
+    circumcentre = Triangulation.circumcentre
+    voronoi = Triangulation.voronoi
 
     def __init__(self, points, scale=1.0):
         points = np.asarray(points, dtype=float)
@@ -220,8 +222,8 @@ def draw(t, title, save=None):
     from matplotlib.collections import LineCollection, PolyCollection
 
     P = np.array(t.points)
-    fig, (insertion, result) = plt.subplots(1, 2, figsize=(14, 7))
-    for ax in (insertion, result):
+    fig, (insertion, result, dual) = plt.subplots(1, 3, figsize=(21, 7))
+    for ax in (insertion, result, dual):
         ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
@@ -275,6 +277,9 @@ def draw(t, title, save=None):
     result.plot(*P[:t.n].T, 'o', color='tab:blue', ms=4)
     result.legend(loc='upper right', fontsize=8)
     result.set_title(f'After removing the virtual triangle: {len(triangles)} of {expected} triangles')
+
+    # Dual of the result. With triangles missing, the stumps follow the dented boundary.
+    draw_dual(dual, t, P[:t.n], t.hull)
 
     fig.suptitle(title)
     fig.tight_layout(rect=(0, 0, 1, 0.96))  # Room for the title above both panels

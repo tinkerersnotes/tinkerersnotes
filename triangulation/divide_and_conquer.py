@@ -10,6 +10,9 @@ between the bridges is zipped up with triangles from one bridge to the other, an
 two triangles break the empty circle rule is flipped (Lawson), which can reach deep into either
 half. When no edge is left to flip, the triangulation is Delaunay.
 
+Dual: joining the circumcentres of triangles across each inner edge gives the Voronoi diagram, and
+each hull edge gets a short stump outwards, standing in for its ray to infinity.
+
 Points are assumed to have no three on a line, which uniformly distributed random points satisfy
 with probability 1. Four or more on a circle are fine: any of their triangulations is Delaunay, and the
 circle test ignores differences within rounding noise, so such edges never flip back and forth.
@@ -121,6 +124,40 @@ class Triangulation:
     def illegal_edges(self):
         return [(a, b) for (a, b), c in self.apex.items()
                 if (b, a) in self.apex and self.inside(a, b, c, self.apex[b, a])]
+
+    def circumcentre(self, a, b, c):
+        """Centre of the circle through points a, b and c, measured from a to keep the numbers small."""
+        P = self.points
+        (ax, ay), (bx, by), (cx, cy) = P[a], P[b], P[c]
+        bx, by, cx, cy = bx - ax, by - ay, cx - ax, cy - ay
+        b2, c2, d = bx * bx + by * by, cx * cx + cy * cy, 2 * (bx * cy - by * cx)
+        return ax + (cy * b2 - by * c2) / d, ay + (bx * c2 - cx * b2) / d
+
+    def voronoi(self, stump):
+        """The dual of the triangulation, the Voronoi diagram: one edge for each of its edges, as
+        ((x1, y1), (x2, y2)). Returns the edges joining the circumcentres of the two triangles on
+        either side of an inner edge, and the stumps for hull edges.
+
+        A hull edge's dual is a ray outwards from its triangle's circumcentre, along the edge's
+        outward normal and through its midpoint, since a circumcentre lies on the perpendicular
+        bisector of every edge. Its stump ends at a virtual vertex stump past the hull edge, or past
+        the circumcentre when that is outside already, as for a triangle obtuse opposite the edge."""
+        P = self.points
+        edges, stumps = [], []
+        for (a, b), c in self.apex.items():
+            d = self.apex.get((b, a))
+            if d is not None:
+                if a < b:
+                    edges.append((self.circumcentre(a, b, c), self.circumcentre(b, a, d)))
+                continue
+            centre = np.array(self.circumcentre(a, b, c))
+            pa, pb = np.array(P[a]), np.array(P[b])
+            # The triangle is on the left of a -> b, the outside on the right
+            normal = np.array([pb[1] - pa[1], pa[0] - pb[0]]) / np.linalg.norm(pb - pa)
+            middle = (pa + pb) / 2
+            beyond = max((centre - middle) @ normal, 0) + stump
+            stumps.append((tuple(centre), tuple(middle + beyond * normal)))
+        return edges, stumps
 
     def triangulate(self, ids, depth=0):
         """Triangulate the points ids, return their convex hull in counterclockwise order."""
@@ -235,6 +272,34 @@ class Triangulation:
         return walk(right, r_low, r_high, +1) + walk(left, l_high, l_low, +1)
 
 
+def draw_dual(ax, t, P, hull):
+    """The Voronoi diagram of triangulation t on the axes ax, over the triangulation drawn faint, its
+    vertices the circumcentres. Thin triangles have far away circumcentres, so the view stays on the
+    points P, the hull's points among them."""
+    from matplotlib.collections import LineCollection
+
+    triangles = t.triangles()
+    lo, hi = P.min(axis=0), P.max(axis=0)
+    margin = 0.15 * (hi - lo).max()
+    edges = {tuple(sorted(e)) for tri in triangles for e in zip(tri, tri[1:] + tri[:1])}
+    voronoi, stumps = t.voronoi(stump=0.06 * (hi - lo).max())
+    ax.add_collection(LineCollection([P[list(e)] for e in edges], colors='0.8', lw=0.6))
+    ax.add_collection(LineCollection(voronoi, colors='tab:orange', lw=1.2))
+    ax.add_collection(LineCollection(stumps, colors='tab:orange', lw=1.2, linestyles=':'))
+    centres = np.array([t.circumcentre(*tri) for tri in triangles]).reshape(-1, 2)
+    ax.plot(*centres.T, '.', color='tab:orange', ms=4, label='Circumcentres')
+    ax.plot([], [], color='tab:orange', lw=1.2, label='Voronoi edges')
+    ax.plot([], [], color='tab:orange', lw=1.2, ls=':', label='Stumps past hull edges')
+    if hull:
+        ax.plot(*P[hull + hull[:1]].T, color='0.55', lw=1)
+    ax.plot(*P.T, 'o', color='black', ms=4)
+    ax.set_xlim(lo[0] - margin, hi[0] + margin)
+    ax.set_ylim(lo[1] - margin, hi[1] + margin)
+    ax.set_title(f'Dual: {len(voronoi)} Voronoi edges, {len(stumps)} stumps')
+    if triangles:
+        ax.legend(loc='upper right', fontsize=8)
+
+
 def draw(t, title, save=None):
     import matplotlib
     if save:
@@ -247,8 +312,8 @@ def draw(t, title, save=None):
     max_depth = max((d for d, *_ in t.splits), default=0)
     depth_color = plt.cm.viridis(np.linspace(0, 0.85, max_depth + 1))
 
-    fig, (divide, conquer) = plt.subplots(1, 2, figsize=(14, 7))
-    for ax in (divide, conquer):
+    fig, (divide, conquer, dual) = plt.subplots(1, 3, figsize=(21, 7))
+    for ax in (divide, conquer, dual):
         ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
@@ -292,8 +357,10 @@ def draw(t, title, save=None):
     conquer.set_title(f'Conquer: {len(triangles)} Delaunay triangles, {t.flips} edge flips')
     conquer.legend(loc='upper right', fontsize=8)
 
+    draw_dual(dual, t, P, t.hull)
+
     fig.suptitle(title)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.96))  # Room for the title above the panels
     if save:
         fig.savefig(save, dpi=120)
         print(f'Saved {save}')
