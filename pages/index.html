@@ -1,10 +1,11 @@
 <!doctype html>
-<!-- Front page of the GitHub Pages site (.github/workflows/pages.yml): links to the demos -->
+<!-- Front page of the GitHub Pages site (.github/workflows/pages.yml): links to the demos, and to the
+     notebooks in Google Colab and on GitHub -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tinkerer's Notes Demos</title>
+<title>Tinkerer's Notes Demos and Notebooks</title>
 <style>
   :root {
     color-scheme: light;
@@ -51,13 +52,29 @@
   .demo:hover, .demo:focus-visible { border-color: var(--accent); }
   .demo h3 { font-size: 1.15rem; margin: 0 0 6px; color: var(--accent); }
   .demo p { margin: 0; color: var(--text-secondary); }
+  .notebooks { list-style: none; margin: 0; padding: 0; }
+  .notebook {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .notebook h3 { font-size: 1.15rem; margin: 0; }
+  .notebook p { margin: 0; color: var(--text-secondary); }
+  .notebook .note { font-size: 0.9rem; }
+  .notebook .links { margin-top: auto; padding-top: 4px; color: var(--text-secondary); }
+  .notebook a { color: var(--accent); }
+  .notebook .links code { display: block; margin-top: 4px; font-size: 0.8rem; color: var(--text-secondary); overflow-wrap: anywhere; }
   footer { margin-top: 24px; color: var(--text-secondary); font-size: 0.9rem; }
   footer a { color: var(--accent); }
 </style>
 </head>
 <body>
 <main>
-  <h1>Demos</h1>
+  <h1>Demos and notebooks</h1>
 
   <section>
     <h2>Seam carving</h2>
@@ -96,6 +113,48 @@
           triangulations, and each coordinate plane shows, in relief, the side of the hull facing it.</p>
       </a>
     </div>
+  </section>
+
+  <section>
+    <h2>Notebooks</h2>
+    <p class="lede">The repository’s Jupyter notebooks. Google Colab runs one with a Google account; where
+      Colab lacks something a notebook needs, its first cell fetches or installs it. GitHub shows a notebook’s
+      code without running it, and without outputs, since they aren’t committed: plots appear only when a
+      notebook runs.</p>
+
+    <ul class="demos notebooks">
+      <li class="notebook">
+        <h3>Divide and conquer Delaunay triangulation</h3>
+        <p>Splits points by lines through their centre of mass, merges the halves with flips, and draws the result and its dual, the Voronoi diagram, for four point sets.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/triangulation/divide_and_conquer.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/triangulation/divide_and_conquer.ipynb">View on GitHub</a> <code>triangulation/divide_and_conquer.ipynb</code></p>
+      </li>
+      <li class="notebook">
+        <h3>Incremental Delaunay triangulation</h3>
+        <p>Inserts points one by one into a virtual triangle, finite or with its corners at infinity, and shows which triangles a finite one loses.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/triangulation/incremental.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/triangulation/incremental.ipynb">View on GitHub</a> <code>triangulation/incremental.ipynb</code></p>
+      </li>
+      <li class="notebook">
+        <h3>Seam carvers compared</h3>
+        <p>Times the pure Python, Cython, C++ and other seam carvers in the repository as more and more seams are removed.</p>
+        <p class="note">Needs the repository’s compiled modules, so it runs only in a local checkout, after <code>./init.sh</code>.</p>
+        <p class="links"><a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/seam_carver.ipynb">View on GitHub</a> <code>seam_carver.ipynb</code></p>
+      </li>
+      <li class="notebook">
+        <h3>Cython and ctypes</h3>
+        <p>Counts primes in Python and three Cython versions, and sorts with C’s qsort through ctypes, with timing plots.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/cython_and_ctypes.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/cython_and_ctypes.ipynb">View on GitHub</a> <code>cython_and_ctypes.ipynb</code></p>
+      </li>
+      <li class="notebook">
+        <h3>Memory-mapped files in Python</h3>
+        <p>Sorts a file’s bytes in place through numpy, grows a mapped file, and calls a function straight from a shared library mapped into memory.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/python_mmap.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/python_mmap.ipynb">View on GitHub</a> <code>python_mmap.ipynb</code></p>
+      </li>
+      <li class="notebook">
+        <h3>Correlated random samples</h3>
+        <p>Turns independent normal samples into correlated ones with the Cholesky factor of a correlation matrix, plotted in interactive 3D.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/statistics_playground.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/statistics_playground.ipynb">View on GitHub</a> <code>statistics_playground.ipynb</code></p>
+      </li>
+    </ul>
   </section>
 
   <footer>Source: <a href="https://github.com/tinkerersnotes/tinkerersnotes">github.com/tinkerersnotes/tinkerersnotes</a></footer>
