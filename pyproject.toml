@@ -21,6 +21,7 @@ build = ["Cython>=3", "setuptools"]
 notebooks = [
     {include-group = "seam-carver"},
     {include-group = "build"},
+    "ipympl>=0.9",    # %matplotlib widget: interactive matplotlib figures in JupyterLab
     "jupyterlab>=4",
     "matplotlib>=3",  # cython_and_ctypes.ipynb plots
     "numpy>=2",       # seam_carver.ipynb image conversions
