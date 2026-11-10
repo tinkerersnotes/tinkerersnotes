@@ -134,6 +134,17 @@
         <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/triangulation/incremental.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/triangulation/incremental.ipynb">View on GitHub</a> <code>triangulation/incremental.ipynb</code></p>
       </li>
       <li class="notebook">
+        <h3>HNSW nearest neighbour search</h3>
+        <p>Builds Hierarchical Navigable Small World graphs, traces a query down their layers, compares the bottom layer with the Delaunay triangulation, and measures recall against work on synthetic data.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/hnsw/hnsw.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/hnsw/hnsw.ipynb">View on GitHub</a> <code>hnsw/hnsw.ipynb</code></p>
+      </li>
+      <li class="notebook">
+        <h3>Finding similar texts with MiniLM</h3>
+        <p>Turns the docstrings of Python’s standard library, numpy and matplotlib, and this repository’s notes, into vectors with a small transformer, then searches them by meaning with HNSW.</p>
+        <p class="note">Downloads the 90 MB MiniLM model from Hugging Face on its first run.</p>
+        <p class="links"><a href="https://colab.research.google.com/github/tinkerersnotes/tinkerersnotes/blob/main/hnsw/minilm_search.ipynb">Run in Colab</a> · <a href="https://github.com/tinkerersnotes/tinkerersnotes/blob/main/hnsw/minilm_search.ipynb">View on GitHub</a> <code>hnsw/minilm_search.ipynb</code></p>
+      </li>
+      <li class="notebook">
         <h3>Seam carvers compared</h3>
         <p>Times the pure Python, Cython, C++ and other seam carvers in the repository as more and more seams are removed.</p>
         <p class="note">Needs the repository’s compiled modules, so it runs only in a local checkout, after <code>./init.sh</code>.</p>
