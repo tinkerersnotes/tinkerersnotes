@@ -25,6 +25,8 @@ notebooks = [
     "jupyterlab>=4",
     "matplotlib>=3",  # cython_and_ctypes.ipynb plots
     "numpy>=2",       # seam_carver.ipynb image conversions
+    "onnxruntime>=1.20",  # hnsw/minilm.py: runs the MiniLM sentence embedding model
+    "tokenizers>=0.20",   # hnsw/minilm.py: MiniLM's tokenizer; brings huggingface_hub, which downloads the model
 ]
 
 # Repository tooling: nbstripout keeps notebook outputs out of commits (configure_git.py)
